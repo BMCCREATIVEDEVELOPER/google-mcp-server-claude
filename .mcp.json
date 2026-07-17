@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gmail-calendar": {
+      "command": "c:/Users/Bismillah Traders/cc/existing-Claude-Code-MCP-for-G--windows/.venv/Scripts/python.exe",
+      "args": [
+        "c:/Users/Bismillah Traders/cc/existing-Claude-Code-MCP-for-G--windows/server.py"
+      ]
+    }
+  }
+}

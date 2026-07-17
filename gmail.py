@@ -197,7 +197,9 @@ class GmailService:
         # The inline image fallback is used only when neither HTML signature
         # source (auto-fetched or config) provided anything.
         use_inline_image = (
-            bool(self.signature_image_path) and not effective_html_signature
+            bool(self.signature_image_path)
+            and not effective_html_signature
+            and os.path.isfile(self.signature_image_path)
         )
 
         html_content = html_body or ""

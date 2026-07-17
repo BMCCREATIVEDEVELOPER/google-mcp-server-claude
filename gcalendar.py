@@ -26,7 +26,7 @@ class CalendarService:
             for cal in result.get("items", [])
         ]
 
-    # ------------------------------------------------------------------ events
+    # ------------------------------------------------------------------ events - READ
 
     def list_events(
         self,
@@ -88,6 +88,85 @@ class CalendarService:
             calendarId=calendar_id, eventId=event_id
         ).execute()
         return self._parse_event(event)
+
+    # ------------------------------------------------------------------ events - CREATE
+
+    def create_event(
+        self,
+        title: str,
+        start_time: str,
+        end_time: str,
+        calendar_id: str = "primary",
+        description: str = "",
+        location: str = "",
+        attendees: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create a new calendar event."""
+        event = {
+            "summary": title,
+            "description": description,
+            "location": location,
+            "start": {"dateTime": start_time},
+            "end": {"dateTime": end_time},
+        }
+
+        if attendees:
+            event["attendees"] = [{"email": email} for email in attendees]
+
+        created_event = self.service.events().insert(
+            calendarId=calendar_id, body=event
+        ).execute()
+        return self._parse_event(created_event)
+
+    # ------------------------------------------------------------------ events - UPDATE
+
+    def update_event(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+        title: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        description: Optional[str] = None,
+        location: Optional[str] = None,
+        attendees: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing calendar event."""
+        event = self.service.events().get(
+            calendarId=calendar_id, eventId=event_id
+        ).execute()
+
+        if title is not None:
+            event["summary"] = title
+        if description is not None:
+            event["description"] = description
+        if location is not None:
+            event["location"] = location
+        if start_time is not None:
+            event["start"] = {"dateTime": start_time}
+        if end_time is not None:
+            event["end"] = {"dateTime": end_time}
+        if attendees is not None:
+            event["attendees"] = [{"email": email} for email in attendees]
+
+        updated_event = self.service.events().update(
+            calendarId=calendar_id, eventId=event_id, body=event
+        ).execute()
+        return self._parse_event(updated_event)
+
+    # ------------------------------------------------------------------ events - DELETE
+
+    def delete_event(self, event_id: str, calendar_id: str = "primary") -> Dict[str, str]:
+        """Delete a calendar event."""
+        self.service.events().delete(
+            calendarId=calendar_id, eventId=event_id
+        ).execute()
+        return {
+            "status": "deleted",
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "message": f"Event {event_id} deleted from {calendar_id}",
+        }
 
     # ------------------------------------------------------------------ internals
 
