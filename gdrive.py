@@ -1,9 +1,11 @@
 import io
+import mimetypes
+import os
 from typing import Any, Dict, List, Optional
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # MIME types that can be exported as plain text from Google Workspace formats
 _EXPORT_MAP = {
@@ -150,6 +152,30 @@ class DriveService:
             "size_bytes": len(raw),
             "content": content,
         }
+
+    def upload_file(
+        self,
+        file_path: str,
+        folder_id: Optional[str] = None,
+        name: Optional[str] = None,
+        mime_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload a local file to Drive, optionally into a specific folder."""
+        if not os.path.isfile(file_path):
+            raise ValueError(f"File not found: {file_path}")
+
+        resolved_mime = mime_type or mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        body: Dict[str, Any] = {"name": name or os.path.basename(file_path)}
+        if folder_id:
+            body["parents"] = [folder_id]
+
+        media = MediaFileUpload(file_path, mimetype=resolved_mime, resumable=True)
+        f = self.service.files().create(
+            body=body,
+            media_body=media,
+            fields="id,name,mimeType,size,modifiedTime,parents,webViewLink,owners",
+        ).execute()
+        return self._parse_file(f)
 
     def delete_file(self, file_id: str) -> Dict[str, str]:
         """Move a file to trash."""

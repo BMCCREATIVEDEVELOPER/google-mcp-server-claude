@@ -12,7 +12,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 import mcp.types as types
 from mcp.server import Server
@@ -75,6 +75,64 @@ def _get_calendar(account_name: str) -> CalendarService:
 
 def _get_drive(account_name: str) -> DriveService:
     return DriveService(_get_creds(account_name), account_name)
+
+
+def _check_cross_account_conflicts(
+    time_min: str, time_max: str, exclude_account: str
+) -> Dict[str, list]:
+    """Check every other configured account's primary calendar for busy periods
+    overlapping the given window. Skips accounts that aren't authenticated."""
+    conflicts: Dict[str, list] = {}
+    for acct in _accounts:
+        if acct == exclude_account:
+            continue
+        try:
+            busy = _get_calendar(acct).get_busy_periods(time_min, time_max)
+        except ValueError:
+            continue
+        if busy:
+            conflicts[acct] = busy
+    return conflicts
+
+
+def _sync_linked_events(
+    source_account: str, source_event_id: str, start_time: str = None, end_time: str = None
+) -> list:
+    """Update the blocking events on other accounts' primary calendars that were
+    created for source_event_id, to match its new start/end time."""
+    synced_on = []
+    for acct in _accounts:
+        if acct == source_account:
+            continue
+        try:
+            cal = _get_calendar(acct)
+        except ValueError:
+            continue
+        for linked in cal.find_linked_events(source_event_id):
+            cal.update_event(
+                event_id=linked["id"],
+                start_time=start_time,
+                end_time=end_time,
+            )
+            synced_on.append(acct)
+    return synced_on
+
+
+def _delete_linked_events(source_account: str, source_event_id: str) -> list:
+    """Delete the blocking events on other accounts' primary calendars that were
+    created for source_event_id."""
+    deleted_on = []
+    for acct in _accounts:
+        if acct == source_account:
+            continue
+        try:
+            cal = _get_calendar(acct)
+        except ValueError:
+            continue
+        for linked in cal.find_linked_events(source_event_id):
+            cal.delete_event(event_id=linked["id"])
+            deleted_on.append(acct)
+    return deleted_on
 
 
 def _fmt(data: Any) -> list[types.TextContent]:
@@ -417,6 +475,15 @@ async def list_tools() -> list[types.Tool]:
                         "items": {"type": "string"},
                         "description": "Attendee email addresses to invite",
                     },
+                    "block_other_calendars": {
+                        "type": "boolean",
+                        "description": (
+                            "If true (default), checks all other configured accounts for conflicts "
+                            "and creates a matching busy-block event on each of their primary calendars, "
+                            "titled '[<account> booking]'."
+                        ),
+                        "default": True,
+                    },
                 },
                 "required": ["account", "title", "start_time", "end_time"],
             },
@@ -558,6 +625,21 @@ async def list_tools() -> list[types.Tool]:
                     "file_id": {"type": "string", "description": "Google Drive file ID"},
                 },
                 "required": ["account", "file_id"],
+            },
+        ),
+        types.Tool(
+            name="drive_upload_file",
+            description="Upload a local file to Google Drive, optionally into a specific folder.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "file_path": {"type": "string", "description": "Absolute path to the local file to upload"},
+                    "folder_id": {"type": "string", "description": "Destination folder ID. Omit to upload to Drive root."},
+                    "name": {"type": "string", "description": "Name to give the uploaded file. Defaults to the local file name."},
+                    "mime_type": {"type": "string", "description": "MIME type override. Auto-detected from the file extension if omitted."},
+                },
+                "required": ["account", "file_path"],
             },
         ),
     ]
@@ -724,21 +806,55 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
 
         # ---- calendar_create_event -----------------------------------------
         elif name == "calendar_create_event":
-            svc = _get_calendar(args["account"])
-            return _fmt(svc.create_event(
+            account = args["account"]
+            start_time = args["start_time"]
+            end_time = args["end_time"]
+
+            conflicts = _check_cross_account_conflicts(start_time, end_time, account)
+
+            svc = _get_calendar(account)
+            created = svc.create_event(
                 title=args["title"],
-                start_time=args["start_time"],
-                end_time=args["end_time"],
+                start_time=start_time,
+                end_time=end_time,
                 calendar_id=args.get("calendar_id", "primary"),
                 description=args.get("description", ""),
                 location=args.get("location", ""),
                 attendees=args.get("attendees"),
-            ))
+            )
+
+            blocked_on = []
+            if args.get("block_other_calendars", True):
+                for acct in _accounts:
+                    if acct == account:
+                        continue
+                    try:
+                        _get_calendar(acct).create_event(
+                            title=f"[{account} booking]",
+                            start_time=start_time,
+                            end_time=end_time,
+                            description=f"Auto-blocked because '{account}' has a booking at this time.",
+                            private_properties={
+                                "sync_source_account": account,
+                                "sync_source_event_id": created["id"],
+                            },
+                        )
+                        blocked_on.append(acct)
+                    except ValueError:
+                        continue
+
+            result = dict(created)
+            if conflicts:
+                result["conflicts_detected"] = conflicts
+            if blocked_on:
+                result["blocked_on_accounts"] = blocked_on
+            return _fmt(result)
 
         # ---- calendar_update_event -----------------------------------------
         elif name == "calendar_update_event":
-            svc = _get_calendar(args["account"])
-            return _fmt(svc.update_event(
+            account = args["account"]
+            svc = _get_calendar(account)
+            updated = svc.update_event(
                 event_id=args["event_id"],
                 calendar_id=args.get("calendar_id", "primary"),
                 title=args.get("title"),
@@ -747,15 +863,33 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 description=args.get("description"),
                 location=args.get("location"),
                 attendees=args.get("attendees"),
-            ))
+            )
+
+            result = dict(updated)
+            if args.get("start_time") or args.get("end_time"):
+                synced_on = _sync_linked_events(
+                    account,
+                    args["event_id"],
+                    start_time=updated["start"],
+                    end_time=updated["end"],
+                )
+                if synced_on:
+                    result["synced_on_accounts"] = synced_on
+            return _fmt(result)
 
         # ---- calendar_delete_event -----------------------------------------
         elif name == "calendar_delete_event":
-            svc = _get_calendar(args["account"])
-            return _fmt(svc.delete_event(
+            account = args["account"]
+            deleted_on = _delete_linked_events(account, args["event_id"])
+
+            svc = _get_calendar(account)
+            result = svc.delete_event(
                 event_id=args["event_id"],
                 calendar_id=args.get("calendar_id", "primary"),
-            ))
+            )
+            if deleted_on:
+                result["deleted_on_accounts"] = deleted_on
+            return _fmt(result)
 
         # ---- drive_list_files --------------------------------------------
         elif name == "drive_list_files":
@@ -799,6 +933,16 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             svc = _get_drive(args["account"])
             svc.delete_file(args["file_id"])
             return _fmt({"status": "trashed", "file_id": args["file_id"]})
+
+        # ---- drive_upload_file --------------------------------------------
+        elif name == "drive_upload_file":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.upload_file(
+                file_path=args["file_path"],
+                folder_id=args.get("folder_id"),
+                name=args.get("name"),
+                mime_type=args.get("mime_type"),
+            ))
 
         else:
             return _fmt(f"Unknown tool: {name}")

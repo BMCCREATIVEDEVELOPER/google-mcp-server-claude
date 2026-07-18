@@ -89,6 +89,19 @@ class CalendarService:
         ).execute()
         return self._parse_event(event)
 
+    def get_busy_periods(
+        self, time_min: str, time_max: str, calendar_id: str = "primary"
+    ) -> List[Dict[str, str]]:
+        """Return busy time blocks on this calendar within the given window."""
+        result = self.service.freebusy().query(
+            body={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "items": [{"id": calendar_id}],
+            }
+        ).execute()
+        return result.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+
     # ------------------------------------------------------------------ events - CREATE
 
     def create_event(
@@ -100,6 +113,7 @@ class CalendarService:
         description: str = "",
         location: str = "",
         attendees: Optional[List[str]] = None,
+        private_properties: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a new calendar event."""
         event = {
@@ -112,11 +126,24 @@ class CalendarService:
 
         if attendees:
             event["attendees"] = [{"email": email} for email in attendees]
+        if private_properties:
+            event["extendedProperties"] = {"private": private_properties}
 
         created_event = self.service.events().insert(
             calendarId=calendar_id, body=event
         ).execute()
         return self._parse_event(created_event)
+
+    def find_linked_events(
+        self, source_event_id: str, calendar_id: str = "primary"
+    ) -> List[Dict[str, Any]]:
+        """Find events on this calendar tagged as blocking-copies of source_event_id."""
+        result = self.service.events().list(
+            calendarId=calendar_id,
+            privateExtendedProperty=f"sync_source_event_id={source_event_id}",
+            singleEvents=True,
+        ).execute()
+        return [self._parse_event(e) for e in result.get("items", [])]
 
     # ------------------------------------------------------------------ events - UPDATE
 
