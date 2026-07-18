@@ -177,6 +177,25 @@ class DriveService:
         ).execute()
         return self._parse_file(f)
 
+    def create_folder(
+        self,
+        name: str,
+        parent_folder_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a new folder in Drive, optionally nested inside a parent folder."""
+        body: Dict[str, Any] = {
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+        }
+        if parent_folder_id:
+            body["parents"] = [parent_folder_id]
+
+        f = self.service.files().create(
+            body=body,
+            fields="id,name,mimeType,size,modifiedTime,parents,webViewLink,owners",
+        ).execute()
+        return self._parse_file(f)
+
     def delete_file(self, file_id: str) -> Dict[str, str]:
         """Move a file to trash."""
         self.service.files().update(

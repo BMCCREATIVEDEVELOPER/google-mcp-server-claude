@@ -628,6 +628,19 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="drive_create_folder",
+            description="Create a new folder in Google Drive, optionally nested inside a parent folder.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "name": {"type": "string", "description": "Name of the folder to create"},
+                    "parent_folder_id": {"type": "string", "description": "Parent folder ID to create the new folder inside. Omit to create at Drive root."},
+                },
+                "required": ["account", "name"],
+            },
+        ),
+        types.Tool(
             name="drive_upload_file",
             description="Upload a local file to Google Drive, optionally into a specific folder.",
             inputSchema={
@@ -933,6 +946,14 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             svc = _get_drive(args["account"])
             svc.delete_file(args["file_id"])
             return _fmt({"status": "trashed", "file_id": args["file_id"]})
+
+        # ---- drive_create_folder -------------------------------------------
+        elif name == "drive_create_folder":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.create_folder(
+                name=args["name"],
+                parent_folder_id=args.get("parent_folder_id"),
+            ))
 
         # ---- drive_upload_file --------------------------------------------
         elif name == "drive_upload_file":
