@@ -265,6 +265,18 @@ async def list_tools() -> list[types.Tool]:
                         "items": {"type": "string"},
                         "description": "Optional list of local file paths to attach.",
                     },
+                    "thread_id": {
+                        "type": "string",
+                        "description": "Gmail thread ID to reply into. When set, the message is nested into the existing conversation instead of starting a new thread.",
+                    },
+                    "in_reply_to": {
+                        "type": "string",
+                        "description": "Message-ID header of the message being replied to. Sets the MIME In-Reply-To header (get this from a prior gmail_read_message/gmail_read_thread result's 'message-id' field).",
+                    },
+                    "references": {
+                        "type": "string",
+                        "description": "Space-separated chain of Message-IDs for the thread being replied to. Sets the MIME References header.",
+                    },
                 },
                 "required": ["account", "to", "subject", "body"],
             },
@@ -289,6 +301,18 @@ async def list_tools() -> list[types.Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional list of local file paths to attach.",
+                    },
+                    "thread_id": {
+                        "type": "string",
+                        "description": "Gmail thread ID to reply into. When set, the draft is nested into the existing conversation instead of starting a new thread.",
+                    },
+                    "in_reply_to": {
+                        "type": "string",
+                        "description": "Message-ID header of the message being replied to. Sets the MIME In-Reply-To header (get this from a prior gmail_read_message/gmail_read_thread result's 'message-id' field).",
+                    },
+                    "references": {
+                        "type": "string",
+                        "description": "Space-separated chain of Message-IDs for the thread being replied to. Sets the MIME References header.",
                     },
                 },
                 "required": ["account", "to", "subject", "body"],
@@ -735,6 +759,9 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 bcc=args.get("bcc", ""),
                 html_body=args.get("html_body", ""),
                 attachments=args.get("attachments"),
+                thread_id=args.get("thread_id", ""),
+                in_reply_to=args.get("in_reply_to", ""),
+                references=args.get("references", ""),
             )
             return _fmt({
                 "status": "sent",
@@ -753,6 +780,9 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 bcc=args.get("bcc", ""),
                 html_body=args.get("html_body", ""),
                 attachments=args.get("attachments"),
+                thread_id=args.get("thread_id", ""),
+                in_reply_to=args.get("in_reply_to", ""),
+                references=args.get("references", ""),
             )
             return _fmt({"status": "draft created", "draft_id": result.get("id")})
 

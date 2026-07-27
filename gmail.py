@@ -89,6 +89,9 @@ class GmailService:
         bcc: str = "",
         html_body: str = "",
         attachments: Optional[List[str]] = None,
+        thread_id: str = "",
+        in_reply_to: str = "",
+        references: str = "",
     ) -> Dict[str, Any]:
         msg = self._build_message(
             to=to,
@@ -98,9 +101,14 @@ class GmailService:
             bcc=bcc,
             html_body=html_body,
             attachments=attachments,
+            in_reply_to=in_reply_to,
+            references=references,
         )
+        request_body: Dict[str, Any] = {"raw": self._encode(msg)}
+        if thread_id:
+            request_body["threadId"] = thread_id
         return self.service.users().messages().send(
-            userId="me", body={"raw": self._encode(msg)}
+            userId="me", body=request_body
         ).execute()
 
     def create_draft(
@@ -112,6 +120,9 @@ class GmailService:
         bcc: str = "",
         html_body: str = "",
         attachments: Optional[List[str]] = None,
+        thread_id: str = "",
+        in_reply_to: str = "",
+        references: str = "",
     ) -> Dict[str, Any]:
         msg = self._build_message(
             to=to,
@@ -121,9 +132,14 @@ class GmailService:
             bcc=bcc,
             html_body=html_body,
             attachments=attachments,
+            in_reply_to=in_reply_to,
+            references=references,
         )
+        message_body: Dict[str, Any] = {"raw": self._encode(msg)}
+        if thread_id:
+            message_body["threadId"] = thread_id
         return self.service.users().drafts().create(
-            userId="me", body={"message": {"raw": self._encode(msg)}}
+            userId="me", body={"message": message_body}
         ).execute()
 
     # ------------------------------------------------------------------ signature fetch
@@ -172,6 +188,8 @@ class GmailService:
         bcc: str = "",
         html_body: str = "",
         attachments: Optional[List[str]] = None,
+        in_reply_to: str = "",
+        references: str = "",
     ) -> MIMEMultipart:
         """Assemble a MIME message with optional HTML body, per-account
         signature (HTML or inline image fallback) and file attachments.
@@ -243,6 +261,10 @@ class GmailService:
             msg["cc"] = cc
         if bcc:
             msg["bcc"] = bcc
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+        if references:
+            msg["References"] = references
         return msg
 
     @staticmethod
@@ -351,6 +373,7 @@ class GmailService:
             "to": headers.get("to", ""),
             "cc": headers.get("cc", ""),
             "subject": headers.get("subject", "(no subject)"),
+            "message-id": headers.get("message-id", ""),
             "body": body,
         }
 

@@ -170,6 +170,9 @@ All tools will appear automatically.
 | `cc` | no | CC recipients, comma-separated |
 | `bcc` | no | BCC recipients, comma-separated |
 | `attachments` | no | Array of local file paths to attach. A missing path returns a clear error. |
+| `thread_id` | no | Gmail thread ID to reply into, nesting the message/draft into an existing conversation instead of starting a new thread. |
+| `in_reply_to` | no | Message-ID header of the message being replied to. Sets the MIME `In-Reply-To` header. |
+| `references` | no | Space-separated chain of Message-IDs for the thread. Sets the MIME `References` header. |
 
 ### Google Calendar
 
