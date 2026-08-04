@@ -10,12 +10,13 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 - **Send & draft** — compose and send emails, or save drafts, from any account
 - **Label management** — list labels, mark as read/unread, star messages
 - **Google Calendar** — list calendars, browse upcoming events, search by keyword
+- **Google Docs** — create, read, update, and delete documents
 
 ## Requirements
 
 - macOS (tested on macOS 14+)
 - Python 3.11+
-- A Google Cloud project with the Gmail API and Calendar API enabled (free)
+- A Google Cloud project with the Gmail API, Calendar API, and Google Docs API enabled (free)
 - Claude Desktop
 
 ## Installation
@@ -118,6 +119,7 @@ python setup_auth.py
 A browser window will open for each account. Sign in with the correct Google account. Tokens are saved locally and refreshed automatically — you only need to do this once per account.
 
 > **Note:** If you previously authenticated for Gmail only, you must re-run `setup_auth.py` after adding Calendar support so the tokens include the new Calendar permissions.
+> The same applies after adding Google Docs support — re-run `setup_auth.py` once per account so tokens pick up the new `documents` scope, or `docs_*` calls will fail with a permission error.
 
 ### 6. Add the server to Claude Desktop
 
@@ -183,6 +185,28 @@ All tools will appear automatically.
 | `calendar_search` | Search events by keyword (title, description, location, attendees) |
 | `calendar_get_event` | Get full details of a specific event |
 
+### Google Docs
+
+| Tool | Description |
+|------|-------------|
+| `docs_create` | Create a new Google Doc, optionally seeded with initial text content |
+| `docs_read` | Read a document's title and plain-text content |
+| `docs_update` | Append text and/or find-and-replace text across a document |
+| `docs_delete` | Move a document to Drive trash |
+
+#### `docs_update` parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `account` | yes | Account name |
+| `document_id` | yes | Google Docs document ID |
+| `append_text` | no | Text to append to the end of the document |
+| `find_text` | no | Text to find and replace across the whole document |
+| `replace_text` | no | Replacement text used when `find_text` is set (defaults to empty string, i.e. deletes `find_text`) |
+| `match_case` | no | Whether `find_text` matching is case-sensitive (default: false) |
+
+At least one of `append_text` or `find_text` must be provided.
+
 ## Usage Examples
 
 Once connected, you can ask Claude things like:
@@ -199,6 +223,12 @@ Once connected, you can ask Claude things like:
 - *"Search for events related to 'product launch' in my personal calendar"*
 - *"List all my calendars in my work account"*
 - *"What are the details of tomorrow's standup?"*
+
+**Docs:**
+- *"Create a Google Doc called 'Meeting Notes' in my work account"*
+- *"Read the content of this doc: <document_id>"*
+- *"Append today's action items to the end of my project plan doc"*
+- *"Replace all instances of 'Q1' with 'Q2' in that doc"*
 
 ## Adding a New Account
 
@@ -218,10 +248,12 @@ Once connected, you can ask Claude things like:
 
 ```
 gmail-mcp/
-├── server.py           # MCP server — exposes 15 tools to Claude
+├── server.py           # MCP server — exposes tools to Claude
 ├── auth.py             # OAuth2 token manager (per account)
 ├── gmail.py            # Gmail API wrapper
 ├── gcalendar.py        # Google Calendar API wrapper
+├── gdrive.py           # Google Drive API wrapper
+├── gdocs.py            # Google Docs API wrapper
 ├── config.py           # Configuration loader
 ├── setup_auth.py       # One-time authentication script
 ├── setup.sh            # First-time installer

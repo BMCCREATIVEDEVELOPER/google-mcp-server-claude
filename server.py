@@ -23,6 +23,7 @@ from config import get_accounts, get_client_secret_path, get_credentials_dir, lo
 from gcalendar import CalendarService
 from gmail import GmailService
 from gdrive import DriveService
+from gdocs import DocsService
 
 # ---------------------------------------------------------------------------
 # Bootstrap: load config and auth manager at startup
@@ -75,6 +76,10 @@ def _get_calendar(account_name: str) -> CalendarService:
 
 def _get_drive(account_name: str) -> DriveService:
     return DriveService(_get_creds(account_name), account_name)
+
+
+def _get_docs(account_name: str) -> DocsService:
+    return DocsService(_get_creds(account_name), account_name)
 
 
 def _check_cross_account_conflicts(
@@ -679,6 +684,63 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["account", "file_path"],
             },
         ),
+        # ── Docs tools ──────────────────────────────────────────────────────
+        types.Tool(
+            name="docs_create",
+            description="Create a new Google Doc, optionally seeded with initial text content.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "title": {"type": "string", "description": "Title of the new document"},
+                    "content": {"type": "string", "description": "Initial plain-text content to insert into the document. Optional."},
+                },
+                "required": ["account", "title"],
+            },
+        ),
+        types.Tool(
+            name="docs_read",
+            description="Read a Google Doc's title and plain-text content by its document ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "document_id": {"type": "string", "description": "Google Docs document ID (also works with a Drive file ID for a Doc)"},
+                },
+                "required": ["account", "document_id"],
+            },
+        ),
+        types.Tool(
+            name="docs_update",
+            description=(
+                "Update a Google Doc: append text to the end and/or find-and-replace text "
+                "across the whole document. Provide append_text and/or find_text/replace_text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "document_id": {"type": "string", "description": "Google Docs document ID"},
+                    "append_text": {"type": "string", "description": "Text to append to the end of the document. Optional."},
+                    "find_text": {"type": "string", "description": "Text to find and replace, across the whole document. Optional — pair with replace_text."},
+                    "replace_text": {"type": "string", "description": "Replacement text used when find_text is set. Defaults to empty string (i.e. deletes find_text)."},
+                    "match_case": {"type": "boolean", "description": "Whether find_text matching is case-sensitive. Default: false.", "default": False},
+                },
+                "required": ["account", "document_id"],
+            },
+        ),
+        types.Tool(
+            name="docs_delete",
+            description="Move a Google Doc to Drive trash.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "document_id": {"type": "string", "description": "Google Docs document ID"},
+                },
+                "required": ["account", "document_id"],
+            },
+        ),
     ]
 
 
@@ -994,6 +1056,35 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 name=args.get("name"),
                 mime_type=args.get("mime_type"),
             ))
+
+        # ---- docs_create ---------------------------------------------------
+        elif name == "docs_create":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.create_document(
+                title=args["title"],
+                content=args.get("content", ""),
+            ))
+
+        # ---- docs_read -------------------------------------------------------
+        elif name == "docs_read":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.get_document(args["document_id"]))
+
+        # ---- docs_update -----------------------------------------------------
+        elif name == "docs_update":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.update_document(
+                document_id=args["document_id"],
+                append_text=args.get("append_text", ""),
+                find_text=args.get("find_text", ""),
+                replace_text=args.get("replace_text", ""),
+                match_case=bool(args.get("match_case", False)),
+            ))
+
+        # ---- docs_delete -----------------------------------------------------
+        elif name == "docs_delete":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.delete_document(args["document_id"]))
 
         else:
             return _fmt(f"Unknown tool: {name}")
