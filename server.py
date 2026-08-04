@@ -730,6 +730,19 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="docs_rename",
+            description="Rename a Google Doc (changes its title/file name).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "document_id": {"type": "string", "description": "Google Docs document ID"},
+                    "title": {"type": "string", "description": "New title for the document"},
+                },
+                "required": ["account", "document_id", "title"],
+            },
+        ),
+        types.Tool(
             name="docs_delete",
             description="Move a Google Doc to Drive trash.",
             inputSchema={
@@ -1079,6 +1092,14 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 find_text=args.get("find_text", ""),
                 replace_text=args.get("replace_text", ""),
                 match_case=bool(args.get("match_case", False)),
+            ))
+
+        # ---- docs_rename -----------------------------------------------------
+        elif name == "docs_rename":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.rename_document(
+                document_id=args["document_id"],
+                title=args["title"],
             ))
 
         # ---- docs_delete -----------------------------------------------------

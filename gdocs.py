@@ -100,6 +100,19 @@ class DocsService:
 
         return self.get_document(document_id)
 
+    # ------------------------------------------------------------------ rename
+
+    def rename_document(self, document_id: str, title: str) -> Dict[str, Any]:
+        """Rename a Google Doc. The title lives on the Drive file, not the Docs
+        resource itself, so this goes through the Drive API."""
+        if not title:
+            raise ValueError("rename_document requires a non-empty title.")
+
+        self.drive_service.files().update(
+            fileId=document_id, body={"name": title}
+        ).execute()
+        return self.get_document(document_id)
+
     # ------------------------------------------------------------------ delete
 
     def delete_document(self, document_id: str) -> Dict[str, str]:

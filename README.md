@@ -192,6 +192,7 @@ All tools will appear automatically.
 | `docs_create` | Create a new Google Doc, optionally seeded with initial text content |
 | `docs_read` | Read a document's title and plain-text content |
 | `docs_update` | Append text and/or find-and-replace text across a document |
+| `docs_rename` | Rename a document (changes its title/file name) |
 | `docs_delete` | Move a document to Drive trash |
 
 #### `docs_update` parameters
