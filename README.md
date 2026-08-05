@@ -192,6 +192,7 @@ All tools will appear automatically.
 | `docs_create` | Create a new Google Doc, optionally seeded with initial text content |
 | `docs_read` | Read a document's title and plain-text content |
 | `docs_update` | Append text and/or find-and-replace text across a document |
+| `docs_format` | Apply bold, italic, underline, strikethrough, font size/family, or color to text |
 | `docs_rename` | Rename a document (changes its title/file name) |
 | `docs_delete` | Move a document to Drive trash |
 
@@ -207,6 +208,24 @@ All tools will appear automatically.
 | `match_case` | no | Whether `find_text` matching is case-sensitive (default: false) |
 
 At least one of `append_text` or `find_text` must be provided.
+
+#### `docs_format` parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `account` | yes | Account name |
+| `document_id` | yes | Google Docs document ID |
+| `find_text` | no | Text to locate and format (alternative to `start_index`/`end_index`) |
+| `match_case` | no | Whether `find_text` matching is case-sensitive (default: false) |
+| `match_all` | no | Format every occurrence of `find_text`, not just the first (default: true) |
+| `start_index` / `end_index` | no | Explicit range to format, in place of `find_text` |
+| `bold` / `italic` / `underline` / `strikethrough` | no | Set (true) or clear (false) the style |
+| `font_size` | no | Font size in points, e.g. `14` |
+| `font_family` | no | Font family name, e.g. `"Arial"` |
+| `foreground_color` | no | Text color as a hex string, e.g. `"#FF0000"` |
+| `background_color` | no | Highlight color as a hex string, e.g. `"#FFFF00"` |
+
+At least one style change (`bold`, `italic`, `underline`, `strikethrough`, `font_size`, `font_family`, `foreground_color`, and/or `background_color`) must be provided, and either `find_text` or `start_index`/`end_index` to target the range.
 
 ## Usage Examples
 

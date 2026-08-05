@@ -730,6 +730,37 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="docs_format",
+            description=(
+                "Apply character formatting (bold, italic, underline, strikethrough, "
+                "font size, font family, text color, highlight color) to text in a "
+                "Google Doc. Target the text either by find_text (formats the first "
+                "match, or every match when match_all is true) or by an explicit "
+                "start_index/end_index range."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "document_id": {"type": "string", "description": "Google Docs document ID"},
+                    "find_text": {"type": "string", "description": "Text to locate and format. Optional — alternative to start_index/end_index."},
+                    "match_case": {"type": "boolean", "description": "Whether find_text matching is case-sensitive. Default: false.", "default": False},
+                    "match_all": {"type": "boolean", "description": "Format every occurrence of find_text, not just the first. Default: true.", "default": True},
+                    "start_index": {"type": "integer", "description": "Start index of the range to format (alternative to find_text). Must be paired with end_index."},
+                    "end_index": {"type": "integer", "description": "End index (exclusive) of the range to format (alternative to find_text). Must be paired with start_index."},
+                    "bold": {"type": "boolean", "description": "Set (true) or clear (false) bold."},
+                    "italic": {"type": "boolean", "description": "Set (true) or clear (false) italic."},
+                    "underline": {"type": "boolean", "description": "Set (true) or clear (false) underline."},
+                    "strikethrough": {"type": "boolean", "description": "Set (true) or clear (false) strikethrough."},
+                    "font_size": {"type": "number", "description": "Font size in points, e.g. 14."},
+                    "font_family": {"type": "string", "description": "Font family name, e.g. 'Arial'."},
+                    "foreground_color": {"type": "string", "description": "Text color as a hex string, e.g. '#FF0000'."},
+                    "background_color": {"type": "string", "description": "Highlight color as a hex string, e.g. '#FFFF00'."},
+                },
+                "required": ["account", "document_id"],
+            },
+        ),
+        types.Tool(
             name="docs_rename",
             description="Rename a Google Doc (changes its title/file name).",
             inputSchema={
@@ -1092,6 +1123,26 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
                 find_text=args.get("find_text", ""),
                 replace_text=args.get("replace_text", ""),
                 match_case=bool(args.get("match_case", False)),
+            ))
+
+        # ---- docs_format -----------------------------------------------------
+        elif name == "docs_format":
+            svc = _get_docs(args["account"])
+            return _fmt(svc.format_text(
+                document_id=args["document_id"],
+                find_text=args.get("find_text", ""),
+                match_case=bool(args.get("match_case", False)),
+                match_all=bool(args.get("match_all", True)),
+                start_index=args.get("start_index"),
+                end_index=args.get("end_index"),
+                bold=args.get("bold"),
+                italic=args.get("italic"),
+                underline=args.get("underline"),
+                strikethrough=args.get("strikethrough"),
+                font_size=args.get("font_size"),
+                font_family=args.get("font_family"),
+                foreground_color=args.get("foreground_color"),
+                background_color=args.get("background_color"),
             ))
 
         # ---- docs_rename -----------------------------------------------------
