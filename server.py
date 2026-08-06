@@ -10,7 +10,9 @@ Configure accounts in config.json and authenticate with: python setup_auth.py
 
 import asyncio
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -25,6 +27,7 @@ from gmail import GmailService
 from gdrive import DriveService
 from gdocs import DocsService
 from gsheets import SheetsService
+from gforms import FormsService
 
 # ---------------------------------------------------------------------------
 # Bootstrap: load config and auth manager at startup
@@ -85,6 +88,20 @@ def _get_docs(account_name: str) -> DocsService:
 
 def _get_sheets(account_name: str) -> SheetsService:
     return SheetsService(_get_creds(account_name), account_name)
+
+
+def _get_forms(account_name: str) -> FormsService:
+    return FormsService(_get_creds(account_name), account_name)
+
+
+def _download_drive_attachments(account_name: str, drive_ids: list, tmp_dir: str) -> list:
+    """Download each Drive file ID to tmp_dir for use as a real email
+    attachment. Caller owns tmp_dir and is responsible for cleaning it up."""
+    drive_svc = _get_drive(account_name)
+    return [
+        drive_svc.download_to_path(destination_dir=tmp_dir, file_id=fid)["path"]
+        for fid in drive_ids
+    ]
 
 
 def _check_cross_account_conflicts(
@@ -275,6 +292,11 @@ async def list_tools() -> list[types.Tool]:
                         "items": {"type": "string"},
                         "description": "Optional list of local file paths to attach.",
                     },
+                    "drive_attachment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of Google Drive file IDs to attach as real files (downloaded and attached automatically — Docs/Sheets/Slides are exported as PDF). Combine with attachments for a mix of local and Drive files.",
+                    },
                     "thread_id": {
                         "type": "string",
                         "description": "Gmail thread ID to reply into. When set, the message is nested into the existing conversation instead of starting a new thread.",
@@ -312,6 +334,11 @@ async def list_tools() -> list[types.Tool]:
                         "items": {"type": "string"},
                         "description": "Optional list of local file paths to attach.",
                     },
+                    "drive_attachment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of Google Drive file IDs to attach as real files (downloaded and attached automatically — Docs/Sheets/Slides are exported as PDF). Combine with attachments for a mix of local and Drive files.",
+                    },
                     "thread_id": {
                         "type": "string",
                         "description": "Gmail thread ID to reply into. When set, the draft is nested into the existing conversation instead of starting a new thread.",
@@ -342,6 +369,63 @@ async def list_tools() -> list[types.Tool]:
                     },
                 },
                 "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="gmail_get_draft",
+            description="Get the full content (to/cc/bcc/subject/body) of a single draft by its draft ID. Use gmail_list_drafts first to find the ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "draft_id": {"type": "string", "description": "Draft ID (from gmail_list_drafts)"},
+                },
+                "required": ["account", "draft_id"],
+            },
+        ),
+        types.Tool(
+            name="gmail_update_draft",
+            description=(
+                "Edit an existing draft. Only the fields you pass are changed — anything omitted "
+                "keeps its current value from the draft (pass an empty string to explicitly clear "
+                "a field like cc/bcc). This rebuilds the draft's MIME message, so any existing file "
+                "attachments are dropped unless you pass attachments again."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "draft_id": {"type": "string", "description": "Draft ID to update (from gmail_list_drafts)"},
+                    "to": {"type": "string", "description": "New recipient(s), comma-separated. Omit to keep the current value."},
+                    "subject": {"type": "string", "description": "New subject. Omit to keep the current value."},
+                    "body": {"type": "string", "description": "New plain-text body. Omit to keep the current value."},
+                    "html_body": {"type": "string", "description": "New HTML body. Omit to keep the current value (with its existing formatting, signature excluded to avoid duplication)."},
+                    "cc": {"type": "string", "description": "New CC recipients. Omit to keep the current value."},
+                    "bcc": {"type": "string", "description": "New BCC recipients. Omit to keep the current value."},
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Local file paths to attach, replacing any existing attachments. Omit to drop attachments (Gmail's draft update always rebuilds the message).",
+                    },
+                    "drive_attachment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Google Drive file IDs to attach as real files, replacing any existing attachments (Docs/Sheets/Slides are exported as PDF). Combine with attachments for a mix of local and Drive files.",
+                    },
+                },
+                "required": ["account", "draft_id"],
+            },
+        ),
+        types.Tool(
+            name="gmail_delete_draft",
+            description="Permanently delete a draft (not the same as trashing a sent message — there is no undo).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "draft_id": {"type": "string", "description": "Draft ID to delete (from gmail_list_drafts)"},
+                },
+                "required": ["account", "draft_id"],
             },
         ),
         types.Tool(
@@ -572,59 +656,86 @@ async def list_tools() -> list[types.Tool]:
         # ── Drive tools ─────────────────────────────────────────────────────
         types.Tool(
             name="drive_list_files",
-            description="List files in Google Drive for an account, ordered by most recently modified.",
+            description=(
+                "List files in Google Drive for an account, ordered by most recently modified. "
+                "Includes files in My Drive and every Shared Drive the account can access."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
                     "max_results": {"type": "integer", "description": "Max files to return (default 20)", "default": 20},
-                    "folder_id": {"type": "string", "description": "Limit to files inside this folder ID. Omit for all files."},
+                    "folder_id": {"type": "string", "description": "Limit to files inside this folder ID. Alternative to folder_name. Omit both for all files."},
+                    "folder_name": {"type": "string", "description": "Limit to files inside the folder with this exact name. Alternative to folder_id."},
                     "mime_type": {"type": "string", "description": "Filter by MIME type, e.g. 'application/vnd.google-apps.document'"},
+                    "drive_id": {"type": "string", "description": "Scope the listing to one Shared Drive (get its id from drive_list_shared_drives). Omit to search My Drive plus all Shared Drives."},
                 },
                 "required": ["account"],
             },
         ),
         types.Tool(
             name="drive_search",
-            description="Search Google Drive files by name or content across an account.",
+            description=(
+                "Search Google Drive files by name or content across an account. "
+                "Includes files in My Drive and every Shared Drive the account can access."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
                     "query": {"type": "string", "description": "Search keyword(s) — matches file names and full text"},
                     "max_results": {"type": "integer", "description": "Max results (default 20)", "default": 20},
+                    "drive_id": {"type": "string", "description": "Scope the search to one Shared Drive (get its id from drive_list_shared_drives). Omit to search My Drive plus all Shared Drives."},
                 },
                 "required": ["account", "query"],
             },
         ),
         types.Tool(
             name="drive_list_folders",
-            description="List all folders in Google Drive for an account.",
+            description="List all folders in Google Drive for an account, including folders inside Shared Drives.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
                     "max_results": {"type": "integer", "description": "Max folders to return (default 20)", "default": 20},
+                    "drive_id": {"type": "string", "description": "Scope the listing to one Shared Drive (get its id from drive_list_shared_drives). Omit to search My Drive plus all Shared Drives."},
+                },
+                "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="drive_list_shared_drives",
+            description=(
+                "List the Shared Drives (Team Drives) this account can access. Use a returned "
+                "drive id as drive_id in drive_list_files/drive_search to scope to that drive, "
+                "or as a folder_id/parent_folder_id to create or upload directly into its root."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "max_results": {"type": "integer", "description": "Max shared drives to return (default 20)", "default": 20},
                 },
                 "required": ["account"],
             },
         ),
         types.Tool(
             name="drive_get_file",
-            description="Get metadata for a specific Google Drive file by its ID.",
+            description="Get metadata for a specific Google Drive file, identified by ID or exact name.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
-                    "file_id": {"type": "string", "description": "Google Drive file ID"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact file name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple files share it)."},
                 },
-                "required": ["account", "file_id"],
+                "required": ["account"],
             },
         ),
         types.Tool(
             name="drive_read_file",
             description=(
-                "Read the text content of a Google Drive file. "
+                "Read the text content of a Google Drive file, identified by ID or exact name. "
                 "Google Docs export as plain text, Sheets as CSV, Slides as plain text. "
                 "Binary files (images, PDFs) are not readable — use drive_download_file instead."
             ),
@@ -632,61 +743,189 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
-                    "file_id": {"type": "string", "description": "Google Drive file ID"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact file name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple files share it)."},
                 },
-                "required": ["account", "file_id"],
+                "required": ["account"],
             },
         ),
         types.Tool(
             name="drive_download_file",
-            description="Download the raw content of a Google Drive file. Returns UTF-8 text or hex for binary files.",
+            description="Download the raw content of a Google Drive file, identified by ID or exact name. Returns UTF-8 text or hex for binary files.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
-                    "file_id": {"type": "string", "description": "Google Drive file ID"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact file name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple files share it)."},
                 },
-                "required": ["account", "file_id"],
+                "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="drive_download_to_file",
+            description=(
+                "Download a Google Drive file to a real local file on disk, identified by ID or "
+                "exact name — unlike drive_download_file (which returns content inline as text/hex), "
+                "this gives you a local path, e.g. to then attach the file to an email with "
+                "gmail_send/gmail_create_draft's attachments parameter. Google Docs/Sheets/Slides "
+                "are exported as PDF by default."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact file name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple files share it)."},
+                    "destination_dir": {"type": "string", "description": "Local directory to save into. Defaults to the system temp directory."},
+                    "export_mime_type": {"type": "string", "description": "For Google Docs/Sheets/Slides only: override the export format, e.g. 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' for .docx. Defaults to PDF."},
+                },
+                "required": ["account"],
             },
         ),
         types.Tool(
             name="drive_delete_file",
-            description="Move a Google Drive file to trash.",
+            description=(
+                "Delete a Google Drive file, identified by ID or exact name. By default moves it "
+                "to trash (recoverable); pass permanent=true to delete outright, bypassing trash — "
+                "required to empty a Shared Drive before drive_delete_shared_drive will accept it."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
-                    "file_id": {"type": "string", "description": "Google Drive file ID"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact file name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple files share it)."},
+                    "permanent": {"type": "boolean", "description": "Delete outright instead of moving to trash. Cannot be undone. Default: false.", "default": False},
                 },
-                "required": ["account", "file_id"],
+                "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="drive_delete_shared_drive",
+            description=(
+                "Permanently delete a Shared Drive, identified by ID or exact name. There is no "
+                "trash for Shared Drives — this cannot be undone. The drive must be empty first "
+                "(use drive_delete_file with permanent=true on every item inside it)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "drive_id": {"type": "string", "description": "Shared Drive ID. Alternative to drive_name."},
+                    "drive_name": {"type": "string", "description": "Exact name of the Shared Drive. Alternative to drive_id. Errors if the name is ambiguous."},
+                },
+                "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="drive_share",
+            description=(
+                "Grant an email address access to a Drive file, folder, or Shared Drive "
+                "(identified by ID or exact name). To add someone as a member of a Shared "
+                "Drive itself, pass that Shared Drive's own id/name (from drive_list_shared_drives) "
+                "as file_id/file_name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "file_id": {"type": "string", "description": "Google Drive file/folder/Shared Drive ID. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact name to look up. Alternative to file_id. Errors if the name is ambiguous (multiple items share it)."},
+                    "email": {"type": "string", "description": "Email address to grant access to"},
+                    "role": {
+                        "type": "string",
+                        "description": (
+                            "Access level. 'reader' (view only), 'commenter' (view + comment), "
+                            "'writer' (Contributor: view/add/edit), 'fileOrganizer' (Content Manager: "
+                            "also move/delete files — Shared Drives only), or 'organizer' (Manager: "
+                            "full control including membership — Shared Drives only). Default: 'writer'."
+                        ),
+                        "enum": ["reader", "commenter", "writer", "fileOrganizer", "organizer"],
+                        "default": "writer",
+                    },
+                    "send_notification": {"type": "boolean", "description": "Send an email notifying the recipient. Default: true.", "default": True},
+                    "message": {"type": "string", "description": "Optional custom message to include in the notification email."},
+                },
+                "required": ["account", "email"],
             },
         ),
         types.Tool(
             name="drive_create_folder",
-            description="Create a new folder in Google Drive, optionally nested inside a parent folder.",
+            description=(
+                "Create a new folder in Google Drive, optionally nested inside a parent folder "
+                "(identified by ID or exact name). To create at the root of a Shared Drive, pass "
+                "that Shared Drive's own id (from drive_list_shared_drives) as parent_folder_id."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
                     "name": {"type": "string", "description": "Name of the folder to create"},
-                    "parent_folder_id": {"type": "string", "description": "Parent folder ID to create the new folder inside. Omit to create at Drive root."},
+                    "parent_folder_id": {"type": "string", "description": "Parent folder ID to create the new folder inside. Alternative to parent_folder_name. Omit both for Drive root."},
+                    "parent_folder_name": {"type": "string", "description": "Exact name of the parent folder. Alternative to parent_folder_id."},
                 },
                 "required": ["account", "name"],
             },
         ),
         types.Tool(
             name="drive_upload_file",
-            description="Upload a local file to Google Drive, optionally into a specific folder.",
+            description=(
+                "Upload a local file to Google Drive, optionally into a specific folder "
+                "(identified by ID or exact name). To upload to the root of a Shared Drive, "
+                "pass that Shared Drive's own id (from drive_list_shared_drives) as folder_id."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "account": {"type": "string", "description": "Account name"},
                     "file_path": {"type": "string", "description": "Absolute path to the local file to upload"},
-                    "folder_id": {"type": "string", "description": "Destination folder ID. Omit to upload to Drive root."},
+                    "folder_id": {"type": "string", "description": "Destination folder ID. Alternative to folder_name. Omit both to upload to Drive root."},
+                    "folder_name": {"type": "string", "description": "Exact name of the destination folder. Alternative to folder_id."},
                     "name": {"type": "string", "description": "Name to give the uploaded file. Defaults to the local file name."},
                     "mime_type": {"type": "string", "description": "MIME type override. Auto-detected from the file extension if omitted."},
                 },
                 "required": ["account", "file_path"],
+            },
+        ),
+        types.Tool(
+            name="drive_move_file",
+            description=(
+                "Move a Google Drive file into a folder, identified by ID or exact name. Uses Drive's "
+                "parent reassignment (a single add/remove-parents call), not copy-then-delete — "
+                "so it works even in contexts where delete/trash actions are blocked."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID to move. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact name of the file to move. Alternative to file_id. Errors if the name is ambiguous."},
+                    "folder_id": {"type": "string", "description": "Destination folder ID. Alternative to folder_name."},
+                    "folder_name": {"type": "string", "description": "Exact name of the destination folder. Alternative to folder_id."},
+                    "remove_from_current": {
+                        "type": "boolean",
+                        "description": "Remove the file from its current folder(s) so it ends up only in the destination (true), or leave it there too so it appears in both places (false). Default: true.",
+                        "default": True,
+                    },
+                },
+                "required": ["account"],
+            },
+        ),
+        types.Tool(
+            name="drive_copy_file",
+            description="Copy a Google Drive file (identified by ID or exact name), optionally renaming the copy and/or placing it in a specific folder.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "file_id": {"type": "string", "description": "Google Drive file ID to copy. Alternative to file_name."},
+                    "file_name": {"type": "string", "description": "Exact name of the file to copy. Alternative to file_id. Errors if the name is ambiguous."},
+                    "name": {"type": "string", "description": "Name for the copy. Defaults to 'Copy of <original name>'."},
+                    "folder_id": {"type": "string", "description": "Destination folder ID for the copy. Alternative to folder_name. Omit both to place it alongside the original."},
+                    "folder_name": {"type": "string", "description": "Exact name of the destination folder for the copy. Alternative to folder_id."},
+                },
+                "required": ["account"],
             },
         ),
         # ── Docs tools ──────────────────────────────────────────────────────
@@ -990,6 +1229,228 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["account", "spreadsheet_id"],
             },
         ),
+        # ── Forms tools ──────────────────────────────────────────────────────
+        types.Tool(
+            name="forms_create",
+            description=(
+                "Create a new blank Google Form. Only the title (and optionally a separate Drive "
+                "file name) can be set at creation — add questions afterward with forms_add_question."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "title": {"type": "string", "description": "The form's visible title, shown to respondents"},
+                    "document_title": {"type": "string", "description": "Optional separate Drive file name. Defaults to matching title."},
+                },
+                "required": ["account", "title"],
+            },
+        ),
+        types.Tool(
+            name="forms_read",
+            description="Get a form's full structure: title, description, every question (with its item_id/type/options/required flag), the public share link, and publish state.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                },
+                "required": ["account", "form_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_add_question",
+            description=(
+                "Add a question to a form. RADIO/CHECKBOX/DROPDOWN require options. "
+                "FILE_UPLOAD questions cannot be created via the Forms API — not supported."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "title": {"type": "string", "description": "The question text"},
+                    "question_type": {
+                        "type": "string",
+                        "description": "SHORT_TEXT, PARAGRAPH, RADIO, CHECKBOX, DROPDOWN, SCALE, DATE, TIME, or RATING",
+                        "enum": ["SHORT_TEXT", "PARAGRAPH", "RADIO", "CHECKBOX", "DROPDOWN", "SCALE", "DATE", "TIME", "RATING"],
+                    },
+                    "options": {"type": "array", "items": {"type": "string"}, "description": "Answer choices. Required for RADIO/CHECKBOX/DROPDOWN."},
+                    "required": {"type": "boolean", "description": "Whether the question must be answered. Default: false.", "default": False},
+                    "description": {"type": "string", "description": "Optional helper text shown under the question."},
+                    "low": {"type": "integer", "description": "SCALE only: lowest value. Default: 1."},
+                    "high": {"type": "integer", "description": "SCALE only: highest value. Default: 5."},
+                    "low_label": {"type": "string", "description": "SCALE only: label for the lowest value."},
+                    "high_label": {"type": "string", "description": "SCALE only: label for the highest value."},
+                    "include_year": {"type": "boolean", "description": "DATE only: include the year. Default: true.", "default": True},
+                    "include_time": {"type": "boolean", "description": "DATE only: also collect a time. Default: false.", "default": False},
+                    "duration": {"type": "boolean", "description": "TIME only: true for an elapsed duration, false for a time of day. Default: false.", "default": False},
+                    "rating_icon": {"type": "string", "description": "RATING only: icon to use.", "enum": ["STAR", "HEART", "THUMB_UP"], "default": "STAR"},
+                    "rating_levels": {"type": "integer", "description": "RATING only: number of icons in the scale. Default: 5.", "default": 5},
+                    "index": {"type": "integer", "description": "0-based position to insert at. Omit to append at the end."},
+                },
+                "required": ["account", "form_id", "title", "question_type"],
+            },
+        ),
+        types.Tool(
+            name="forms_update_question",
+            description=(
+                "Update an existing question, found by item_id (from forms_add_question or forms_read). "
+                "Any field left unset keeps its current value. Pass question_type (plus options for "
+                "choice types) to change the question's kind; otherwise only required/options are patched."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "item_id": {"type": "string", "description": "Item ID of the question to update (from forms_read)"},
+                    "title": {"type": "string", "description": "New question text. Omit to keep current."},
+                    "question_type": {
+                        "type": "string",
+                        "description": "Change the question's kind. Omit to keep the current kind.",
+                        "enum": ["SHORT_TEXT", "PARAGRAPH", "RADIO", "CHECKBOX", "DROPDOWN", "SCALE", "DATE", "TIME", "RATING"],
+                    },
+                    "options": {"type": "array", "items": {"type": "string"}, "description": "New answer choices (for choice types)."},
+                    "required": {"type": "boolean", "description": "Whether the question must be answered."},
+                    "description": {"type": "string", "description": "New helper text."},
+                    "low": {"type": "integer", "description": "SCALE only: lowest value."},
+                    "high": {"type": "integer", "description": "SCALE only: highest value."},
+                    "low_label": {"type": "string", "description": "SCALE only: label for the lowest value."},
+                    "high_label": {"type": "string", "description": "SCALE only: label for the highest value."},
+                    "include_year": {"type": "boolean", "description": "DATE only: include the year."},
+                    "include_time": {"type": "boolean", "description": "DATE only: also collect a time."},
+                    "duration": {"type": "boolean", "description": "TIME only: elapsed duration vs. time of day."},
+                    "rating_icon": {"type": "string", "description": "RATING only: icon to use.", "enum": ["STAR", "HEART", "THUMB_UP"]},
+                    "rating_levels": {"type": "integer", "description": "RATING only: number of icons in the scale."},
+                },
+                "required": ["account", "form_id", "item_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_move_question",
+            description="Move a question/item to a new 0-based position within a form.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "item_id": {"type": "string", "description": "Item ID of the question to move (from forms_read)"},
+                    "new_index": {"type": "integer", "description": "New 0-based position for the item"},
+                },
+                "required": ["account", "form_id", "item_id", "new_index"],
+            },
+        ),
+        types.Tool(
+            name="forms_delete_question",
+            description="Delete a question/item from a form.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "item_id": {"type": "string", "description": "Item ID of the question to delete (from forms_read)"},
+                },
+                "required": ["account", "form_id", "item_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_update_info",
+            description="Update a form's visible title and/or description (shown to respondents).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "title": {"type": "string", "description": "New title. Omit to keep current."},
+                    "description": {"type": "string", "description": "New description. Omit to keep current."},
+                },
+                "required": ["account", "form_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_update_settings",
+            description="Update form-level settings: email collection and/or quiz mode.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "email_collection_type": {
+                        "type": "string",
+                        "description": "Whether/how to collect respondent emails.",
+                        "enum": ["DO_NOT_COLLECT", "VERIFIED", "RESPONDER_INPUT"],
+                    },
+                    "is_quiz": {"type": "boolean", "description": "Turn quiz grading on/off. Turning off deletes existing grading."},
+                },
+                "required": ["account", "form_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_set_publish_settings",
+            description="Publish/unpublish a form and control whether it's currently accepting responses. Accepting responses requires the form to be published.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "is_published": {"type": "boolean", "description": "Whether the form is published/visible"},
+                    "is_accepting_responses": {"type": "boolean", "description": "Whether the form currently accepts new responses"},
+                },
+                "required": ["account", "form_id", "is_published", "is_accepting_responses"],
+            },
+        ),
+        types.Tool(
+            name="forms_list_responses",
+            description="List submitted responses to a form.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "max_results": {"type": "integer", "description": "Max responses to return (default 20)", "default": 20},
+                },
+                "required": ["account", "form_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_get_response",
+            description="Get a single submitted response by its response ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "response_id": {"type": "string", "description": "Response ID (from forms_list_responses)"},
+                },
+                "required": ["account", "form_id", "response_id"],
+            },
+        ),
+        types.Tool(
+            name="forms_rename",
+            description="Rename a form's Drive file name (the document title) — not the same as the visible title respondents see; use forms_update_info for that.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                    "title": {"type": "string", "description": "New Drive file name"},
+                },
+                "required": ["account", "form_id", "title"],
+            },
+        ),
+        types.Tool(
+            name="forms_delete",
+            description="Move a form to Drive trash (the Forms API has no delete-form call — deletion goes through Drive, same as Docs/Sheets).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "form_id": {"type": "string", "description": "Google Form ID"},
+                },
+                "required": ["account", "form_id"],
+            },
+        ),
     ]
 
 
@@ -1062,46 +1523,104 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
         # ---- gmail_send ---------------------------------------------------
         elif name == "gmail_send":
             svc = _get_service(args["account"])
-            result = svc.send_message(
-                to=args["to"],
-                subject=args["subject"],
-                body=args["body"],
-                cc=args.get("cc", ""),
-                bcc=args.get("bcc", ""),
-                html_body=args.get("html_body", ""),
-                attachments=args.get("attachments"),
-                thread_id=args.get("thread_id", ""),
-                in_reply_to=args.get("in_reply_to", ""),
-                references=args.get("references", ""),
-            )
-            return _fmt({
-                "status": "sent",
-                "message_id": result.get("id"),
-                "thread_id": result.get("threadId"),
-            })
+            tmp_dir = None
+            try:
+                attachments = list(args.get("attachments") or [])
+                if args.get("drive_attachment_ids"):
+                    tmp_dir = tempfile.mkdtemp(prefix="gdrive_attach_")
+                    attachments += _download_drive_attachments(
+                        args["account"], args["drive_attachment_ids"], tmp_dir
+                    )
+                result = svc.send_message(
+                    to=args["to"],
+                    subject=args["subject"],
+                    body=args["body"],
+                    cc=args.get("cc", ""),
+                    bcc=args.get("bcc", ""),
+                    html_body=args.get("html_body", ""),
+                    attachments=attachments or None,
+                    thread_id=args.get("thread_id", ""),
+                    in_reply_to=args.get("in_reply_to", ""),
+                    references=args.get("references", ""),
+                )
+                return _fmt({
+                    "status": "sent",
+                    "message_id": result.get("id"),
+                    "thread_id": result.get("threadId"),
+                })
+            finally:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # ---- gmail_create_draft -------------------------------------------
         elif name == "gmail_create_draft":
             svc = _get_service(args["account"])
-            result = svc.create_draft(
-                to=args["to"],
-                subject=args["subject"],
-                body=args["body"],
-                cc=args.get("cc", ""),
-                bcc=args.get("bcc", ""),
-                html_body=args.get("html_body", ""),
-                attachments=args.get("attachments"),
-                thread_id=args.get("thread_id", ""),
-                in_reply_to=args.get("in_reply_to", ""),
-                references=args.get("references", ""),
-            )
-            return _fmt({"status": "draft created", "draft_id": result.get("id")})
+            tmp_dir = None
+            try:
+                attachments = list(args.get("attachments") or [])
+                if args.get("drive_attachment_ids"):
+                    tmp_dir = tempfile.mkdtemp(prefix="gdrive_attach_")
+                    attachments += _download_drive_attachments(
+                        args["account"], args["drive_attachment_ids"], tmp_dir
+                    )
+                result = svc.create_draft(
+                    to=args["to"],
+                    subject=args["subject"],
+                    body=args["body"],
+                    cc=args.get("cc", ""),
+                    bcc=args.get("bcc", ""),
+                    html_body=args.get("html_body", ""),
+                    attachments=attachments or None,
+                    thread_id=args.get("thread_id", ""),
+                    in_reply_to=args.get("in_reply_to", ""),
+                    references=args.get("references", ""),
+                )
+                return _fmt({"status": "draft created", "draft_id": result.get("id")})
+            finally:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # ---- gmail_list_drafts --------------------------------------------
         elif name == "gmail_list_drafts":
             svc = _get_service(args["account"])
             drafts = svc.list_drafts(int(args.get("max_results", 10)))
             return _fmt({"count": len(drafts), "drafts": drafts})
+
+        # ---- gmail_get_draft -----------------------------------------------
+        elif name == "gmail_get_draft":
+            svc = _get_service(args["account"])
+            return _fmt(svc.get_draft(args["draft_id"]))
+
+        # ---- gmail_update_draft ----------------------------------------------
+        elif name == "gmail_update_draft":
+            svc = _get_service(args["account"])
+            tmp_dir = None
+            try:
+                attachments = args.get("attachments")
+                if args.get("drive_attachment_ids"):
+                    tmp_dir = tempfile.mkdtemp(prefix="gdrive_attach_")
+                    attachments = list(attachments or []) + _download_drive_attachments(
+                        args["account"], args["drive_attachment_ids"], tmp_dir
+                    )
+                result = svc.update_draft(
+                    draft_id=args["draft_id"],
+                    to=args.get("to"),
+                    subject=args.get("subject"),
+                    body=args.get("body"),
+                    cc=args.get("cc"),
+                    bcc=args.get("bcc"),
+                    html_body=args.get("html_body"),
+                    attachments=attachments,
+                )
+                return _fmt({"status": "draft updated", "draft_id": result.get("id")})
+            finally:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # ---- gmail_delete_draft ----------------------------------------------
+        elif name == "gmail_delete_draft":
+            svc = _get_service(args["account"])
+            return _fmt(svc.delete_draft(args["draft_id"]))
 
         # ---- gmail_list_labels --------------------------------------------
         elif name == "gmail_list_labels":
@@ -1251,7 +1770,9 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return _fmt(svc.list_files(
                 max_results=int(args.get("max_results", 20)),
                 folder_id=args.get("folder_id"),
+                folder_name=args.get("folder_name"),
                 mime_type=args.get("mime_type"),
+                drive_id=args.get("drive_id"),
             ))
 
         # ---- drive_search ------------------------------------------------
@@ -1260,33 +1781,84 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return _fmt(svc.search_files(
                 query=args["query"],
                 max_results=int(args.get("max_results", 20)),
+                drive_id=args.get("drive_id"),
             ))
 
         # ---- drive_list_folders ------------------------------------------
         elif name == "drive_list_folders":
             svc = _get_drive(args["account"])
-            return _fmt(svc.list_folders(max_results=int(args.get("max_results", 20))))
+            return _fmt(svc.list_folders(
+                max_results=int(args.get("max_results", 20)),
+                drive_id=args.get("drive_id"),
+            ))
+
+        # ---- drive_list_shared_drives -------------------------------------
+        elif name == "drive_list_shared_drives":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.list_shared_drives(max_results=int(args.get("max_results", 20))))
 
         # ---- drive_get_file ----------------------------------------------
         elif name == "drive_get_file":
             svc = _get_drive(args["account"])
-            return _fmt(svc.get_file(args["file_id"]))
+            return _fmt(svc.get_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+            ))
 
         # ---- drive_read_file ---------------------------------------------
         elif name == "drive_read_file":
             svc = _get_drive(args["account"])
-            return _fmt(svc.read_file(args["file_id"]))
+            return _fmt(svc.read_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+            ))
 
         # ---- drive_download_file -----------------------------------------
         elif name == "drive_download_file":
             svc = _get_drive(args["account"])
-            return _fmt(svc.download_file(args["file_id"]))
+            return _fmt(svc.download_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+            ))
+
+        # ---- drive_download_to_file -----------------------------------------
+        elif name == "drive_download_to_file":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.download_to_path(
+                destination_dir=args.get("destination_dir") or tempfile.gettempdir(),
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+                export_mime_type=args.get("export_mime_type"),
+            ))
 
         # ---- drive_delete_file -------------------------------------------
         elif name == "drive_delete_file":
             svc = _get_drive(args["account"])
-            svc.delete_file(args["file_id"])
-            return _fmt({"status": "trashed", "file_id": args["file_id"]})
+            return _fmt(svc.delete_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+                permanent=bool(args.get("permanent", False)),
+            ))
+
+        # ---- drive_delete_shared_drive --------------------------------------
+        elif name == "drive_delete_shared_drive":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.delete_shared_drive(
+                drive_id=args.get("drive_id"),
+                drive_name=args.get("drive_name"),
+            ))
+
+        # ---- drive_share ---------------------------------------------------
+        elif name == "drive_share":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.add_permission(
+                email=args["email"],
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+                role=args.get("role", "writer"),
+                send_notification=bool(args.get("send_notification", True)),
+                message=args.get("message"),
+            ))
 
         # ---- drive_create_folder -------------------------------------------
         elif name == "drive_create_folder":
@@ -1294,6 +1866,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return _fmt(svc.create_folder(
                 name=args["name"],
                 parent_folder_id=args.get("parent_folder_id"),
+                parent_folder_name=args.get("parent_folder_name"),
             ))
 
         # ---- drive_upload_file --------------------------------------------
@@ -1302,8 +1875,31 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
             return _fmt(svc.upload_file(
                 file_path=args["file_path"],
                 folder_id=args.get("folder_id"),
+                folder_name=args.get("folder_name"),
                 name=args.get("name"),
                 mime_type=args.get("mime_type"),
+            ))
+
+        # ---- drive_move_file -------------------------------------------------
+        elif name == "drive_move_file":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.move_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+                folder_id=args.get("folder_id"),
+                folder_name=args.get("folder_name"),
+                remove_from_current=bool(args.get("remove_from_current", True)),
+            ))
+
+        # ---- drive_copy_file -------------------------------------------------
+        elif name == "drive_copy_file":
+            svc = _get_drive(args["account"])
+            return _fmt(svc.copy_file(
+                file_id=args.get("file_id"),
+                file_name=args.get("file_name"),
+                name=args.get("name"),
+                folder_id=args.get("folder_id"),
+                folder_name=args.get("folder_name"),
             ))
 
         # ---- docs_create ---------------------------------------------------
@@ -1471,6 +2067,136 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
         elif name == "sheets_delete":
             svc = _get_sheets(args["account"])
             return _fmt(svc.delete_spreadsheet(args["spreadsheet_id"]))
+
+        # ---- forms_create ---------------------------------------------------
+        elif name == "forms_create":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.create_form(
+                title=args["title"],
+                document_title=args.get("document_title"),
+            ))
+
+        # ---- forms_read -------------------------------------------------------
+        elif name == "forms_read":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.get_form(args["form_id"]))
+
+        # ---- forms_add_question -----------------------------------------------
+        elif name == "forms_add_question":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.add_question(
+                form_id=args["form_id"],
+                title=args["title"],
+                question_type=args["question_type"],
+                options=args.get("options"),
+                required=bool(args.get("required", False)),
+                description=args.get("description"),
+                low=args.get("low"),
+                high=args.get("high"),
+                low_label=args.get("low_label"),
+                high_label=args.get("high_label"),
+                include_year=bool(args.get("include_year", True)),
+                include_time=bool(args.get("include_time", False)),
+                duration=bool(args.get("duration", False)),
+                rating_icon=args.get("rating_icon", "STAR"),
+                rating_levels=int(args.get("rating_levels", 5)),
+                index=args.get("index"),
+            ))
+
+        # ---- forms_update_question ---------------------------------------------
+        elif name == "forms_update_question":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.update_question(
+                form_id=args["form_id"],
+                item_id=args["item_id"],
+                title=args.get("title"),
+                question_type=args.get("question_type"),
+                options=args.get("options"),
+                required=args.get("required"),
+                description=args.get("description"),
+                low=args.get("low"),
+                high=args.get("high"),
+                low_label=args.get("low_label"),
+                high_label=args.get("high_label"),
+                include_year=args.get("include_year"),
+                include_time=args.get("include_time"),
+                duration=args.get("duration"),
+                rating_icon=args.get("rating_icon"),
+                rating_levels=args.get("rating_levels"),
+            ))
+
+        # ---- forms_move_question -----------------------------------------------
+        elif name == "forms_move_question":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.move_question(
+                form_id=args["form_id"],
+                item_id=args["item_id"],
+                new_index=int(args["new_index"]),
+            ))
+
+        # ---- forms_delete_question ---------------------------------------------
+        elif name == "forms_delete_question":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.delete_question(
+                form_id=args["form_id"],
+                item_id=args["item_id"],
+            ))
+
+        # ---- forms_update_info -------------------------------------------------
+        elif name == "forms_update_info":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.update_info(
+                form_id=args["form_id"],
+                title=args.get("title"),
+                description=args.get("description"),
+            ))
+
+        # ---- forms_update_settings ---------------------------------------------
+        elif name == "forms_update_settings":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.update_settings(
+                form_id=args["form_id"],
+                email_collection_type=args.get("email_collection_type"),
+                is_quiz=args.get("is_quiz"),
+            ))
+
+        # ---- forms_set_publish_settings -----------------------------------------
+        elif name == "forms_set_publish_settings":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.set_publish_settings(
+                form_id=args["form_id"],
+                is_published=bool(args["is_published"]),
+                is_accepting_responses=bool(args["is_accepting_responses"]),
+            ))
+
+        # ---- forms_list_responses ----------------------------------------------
+        elif name == "forms_list_responses":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.list_responses(
+                form_id=args["form_id"],
+                max_results=int(args.get("max_results", 20)),
+            ))
+
+        # ---- forms_get_response -------------------------------------------------
+        elif name == "forms_get_response":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.get_response(
+                form_id=args["form_id"],
+                response_id=args["response_id"],
+            ))
+
+        # ---- forms_rename -----------------------------------------------------
+        elif name == "forms_rename":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.rename_form(
+                form_id=args["form_id"],
+                title=args["title"],
+            ))
+
+        # ---- forms_delete -----------------------------------------------------
+        elif name == "forms_delete":
+            svc = _get_forms(args["account"])
+            return _fmt(svc.delete_form(args["form_id"]))
 
         else:
             return _fmt(f"Unknown tool: {name}")

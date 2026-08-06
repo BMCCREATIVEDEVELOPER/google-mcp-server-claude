@@ -267,6 +267,22 @@ class GmailService:
             msg["References"] = references
         return msg
 
+    def _strip_known_signature(self, html: str) -> str:
+        """Undo what _build_message would append to an HTML body — the
+        account's resolved signature (or inline-image tag) — so a draft's
+        stored HTML can be safely re-fed into _build_message on update
+        without doubling the signature."""
+        if not html:
+            return html
+        gmail_signature = self.get_gmail_signature()
+        effective_html_signature = gmail_signature or self.signature_html
+        if effective_html_signature and html.endswith(effective_html_signature):
+            return html[: -len(effective_html_signature)]
+        image_tag = '<br><img src="cid:signature_image">'
+        if html.endswith(image_tag):
+            return html[: -len(image_tag)]
+        return html
+
     @staticmethod
     def _text_to_html(text: str) -> str:
         """Escape plain text and convert newlines to <br> for the HTML part."""
@@ -317,6 +333,86 @@ class GmailService:
             drafts.append(msg)
 
         return drafts
+
+    def get_draft(self, draft_id: str) -> Dict[str, Any]:
+        details = self.service.users().drafts().get(
+            userId="me", id=draft_id, format="full"
+        ).execute()
+        msg = self._parse_message(details.get("message", {}))
+        msg["draft_id"] = draft_id
+        return msg
+
+    def update_draft(
+        self,
+        draft_id: str,
+        to: Optional[str] = None,
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
+        cc: Optional[str] = None,
+        bcc: Optional[str] = None,
+        html_body: Optional[str] = None,
+        attachments: Optional[List[str]] = None,
+        in_reply_to: str = "",
+        references: str = "",
+    ) -> Dict[str, Any]:
+        """Update an existing draft. Any field left as None keeps the
+        draft's current value; pass a field (including "" to clear it) to
+        change it. Rebuilds the draft's MIME message entirely — existing
+        file attachments are dropped unless you pass attachments again."""
+        existing = self.service.users().drafts().get(
+            userId="me", id=draft_id, format="full"
+        ).execute()
+        existing_message = existing.get("message", {})
+        current = self._parse_message(existing_message)
+        thread_id = existing_message.get("threadId", "")
+
+        current_subject = current.get("subject", "")
+        if current_subject == "(no subject)":
+            current_subject = ""
+        current_html = self._strip_known_signature(
+            self._extract_raw_part(existing_message.get("payload", {}), "text/html")
+        )
+
+        # The plain-text and HTML parts must move together: if only one of
+        # body/html_body is being changed, don't silently keep the other
+        # part's stale old content — regenerate it from whichever new value
+        # was given so the two never desync. Only when NEITHER is passed do
+        # we preserve both exactly as they were. (Passing "" for html_body
+        # is safe: _build_message already derives HTML from the plain body,
+        # plus the account's signature, whenever no explicit HTML is given —
+        # the same fallback a fresh create_draft call would use.)
+        if body is not None:
+            resolved_body = body
+            resolved_html_body = html_body if html_body is not None else ""
+        elif html_body is not None:
+            resolved_html_body = html_body
+            resolved_body = self._html_to_text(html_body)
+        else:
+            resolved_body = current.get("body", "")
+            resolved_html_body = current_html
+
+        msg = self._build_message(
+            to=to if to is not None else current.get("to", ""),
+            subject=subject if subject is not None else current_subject,
+            body=resolved_body,
+            cc=cc if cc is not None else current.get("cc", ""),
+            bcc=bcc if bcc is not None else current.get("bcc", ""),
+            html_body=resolved_html_body,
+            attachments=attachments,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
+        message_body: Dict[str, Any] = {"raw": self._encode(msg)}
+        if thread_id:
+            message_body["threadId"] = thread_id
+
+        return self.service.users().drafts().update(
+            userId="me", id=draft_id, body={"message": message_body}
+        ).execute()
+
+    def delete_draft(self, draft_id: str) -> Dict[str, str]:
+        self.service.users().drafts().delete(userId="me", id=draft_id).execute()
+        return {"status": "deleted", "draft_id": draft_id}
 
     # ------------------------------------------------------------------ labels
 
@@ -372,10 +468,27 @@ class GmailService:
             "from": headers.get("from", ""),
             "to": headers.get("to", ""),
             "cc": headers.get("cc", ""),
+            "bcc": headers.get("bcc", ""),
             "subject": headers.get("subject", "(no subject)"),
             "message-id": headers.get("message-id", ""),
             "body": body,
         }
+
+    def _extract_raw_part(self, payload: Dict[str, Any], mime_type: str) -> str:
+        """Return the raw decoded content of the first part matching
+        mime_type, without HTML-tag stripping. Used internally to preserve
+        an existing draft's HTML formatting when it isn't being overridden."""
+        if not payload:
+            return ""
+        if payload.get("mimeType") == mime_type:
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data.encode()).decode("utf-8", errors="replace")
+        for part in payload.get("parts", []):
+            result = self._extract_raw_part(part, mime_type)
+            if result:
+                return result
+        return ""
 
     def _extract_body(self, payload: Dict[str, Any]) -> str:
         if not payload:
@@ -389,15 +502,7 @@ class GmailService:
                 "utf-8", errors="replace"
             )
             if "html" in mime_type:
-                decoded = re.sub(r"<[^>]+>", " ", decoded)
-                decoded = (
-                    decoded.replace("&nbsp;", " ")
-                    .replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&amp;", "&")
-                    .replace("&quot;", '"')
-                )
-                decoded = re.sub(r"\s+", " ", decoded)
+                decoded = self._html_to_text(decoded)
             return decoded.strip()
 
         parts = payload.get("parts", [])
@@ -416,6 +521,20 @@ class GmailService:
                 return result
 
         return ""
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Strip tags and unescape a handful of common entities to get a
+        rough plain-text equivalent of an HTML body."""
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = (
+            text.replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", '"')
+        )
+        return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
     def _encode(msg: MIMEText | MIMEMultipart) -> str:

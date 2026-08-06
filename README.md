@@ -11,12 +11,14 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 - **Label management** — list labels, mark as read/unread, star messages
 - **Google Calendar** — list calendars, browse upcoming events, search by keyword
 - **Google Docs** — create, read, update, and delete documents
+- **Google Sheets** — create, read, update, and delete spreadsheets, with cell formatting
+- **Google Forms** — create, read, update, and delete forms, questions, and settings; read submitted responses
 
 ## Requirements
 
 - macOS (tested on macOS 14+)
 - Python 3.11+
-- A Google Cloud project with the Gmail API, Calendar API, and Google Docs API enabled (free)
+- A Google Cloud project with the Gmail API, Calendar API, Docs API, Sheets API, and Forms API enabled (free)
 - Claude Desktop
 
 ## Installation
@@ -103,7 +105,7 @@ HTML.
 ### 4. Get Google OAuth credentials
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project and enable the **Gmail API**, **Google Calendar API**, **Google Drive API**, **Google Docs API**, and **Google Sheets API**
+2. Create a project and enable the **Gmail API**, **Google Calendar API**, **Google Drive API**, **Google Docs API**, **Google Sheets API**, and **Google Forms API**
 3. Go to **APIs & Services → Credentials → + Create Credentials → OAuth 2.0 Client ID**
 4. Choose **Desktop app** as the application type
 5. Download the JSON file and save it as `credentials/client_secret.json`
@@ -119,7 +121,7 @@ python setup_auth.py
 A browser window will open for each account. Sign in with the correct Google account. Tokens are saved locally and refreshed automatically — you only need to do this once per account.
 
 > **Note:** If you previously authenticated for Gmail only, you must re-run `setup_auth.py` after adding Calendar support so the tokens include the new Calendar permissions.
-> The same applies after adding Google Docs or Sheets support — re-run `setup_auth.py` once per account so tokens pick up the new `documents`/`spreadsheets` scopes, or `docs_*`/`sheets_*` calls will fail with a permission error.
+> The same applies after adding Google Docs, Sheets, or Forms support — re-run `setup_auth.py` once per account so tokens pick up the new `documents`/`spreadsheets`/`forms.body`/`forms.responses.readonly` scopes, or `docs_*`/`sheets_*`/`forms_*` calls will fail with a permission error.
 
 ### 6. Add the server to Claude Desktop
 
@@ -263,6 +265,43 @@ Ranges use A1 notation, e.g. `"Sheet1!A1:D10"` or just `"Sheet1"` for the whole 
 | `number_format_type` | no | Category for `number_format`: `NUMBER`, `CURRENCY`, `PERCENT`, `DATE`, `TIME`, `DATE_TIME`, `SCIENTIFIC`, or `TEXT` (default: `NUMBER`) |
 
 At least one style change must be provided.
+
+### Google Forms
+
+| Tool | Description |
+|------|-------------|
+| `forms_create` | Create a new blank form (title only — add questions afterward) |
+| `forms_read` | Get a form's title, description, questions (with item IDs/types/options), share link, and publish state |
+| `forms_add_question` | Add a question: SHORT_TEXT, PARAGRAPH, RADIO, CHECKBOX, DROPDOWN, SCALE, DATE, TIME, or RATING |
+| `forms_update_question` | Update an existing question by item ID |
+| `forms_move_question` | Move a question to a new position |
+| `forms_delete_question` | Delete a question |
+| `forms_update_info` | Update the form's visible title/description |
+| `forms_update_settings` | Update email collection and/or quiz mode |
+| `forms_set_publish_settings` | Publish/unpublish a form and control whether it accepts responses |
+| `forms_list_responses` | List submitted responses |
+| `forms_get_response` | Get a single submitted response |
+| `forms_rename` | Rename a form's Drive file name (not the visible title — use `forms_update_info` for that) |
+| `forms_delete` | Move a form to Drive trash |
+
+**Known limitation:** the Forms API cannot create FILE_UPLOAD questions at all (a hard Google API restriction, not something this server can work around). Submitted file-upload answers can still be read via `forms_get_response`/`forms_list_responses` (returned as Drive file IDs), just not created as a new question.
+
+#### `forms_add_question` parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `account` | yes | Account name |
+| `form_id` | yes | Google Form ID |
+| `title` | yes | The question text |
+| `question_type` | yes | `SHORT_TEXT`, `PARAGRAPH`, `RADIO`, `CHECKBOX`, `DROPDOWN`, `SCALE`, `DATE`, `TIME`, or `RATING` |
+| `options` | conditional | Answer choices — required for `RADIO`/`CHECKBOX`/`DROPDOWN` |
+| `required` | no | Whether the question must be answered (default: false) |
+| `description` | no | Helper text shown under the question |
+| `low` / `high` / `low_label` / `high_label` | no | `SCALE` only |
+| `include_year` / `include_time` | no | `DATE` only |
+| `duration` | no | `TIME` only — elapsed duration vs. time of day |
+| `rating_icon` / `rating_levels` | no | `RATING` only |
+| `index` | no | 0-based position to insert at (default: append at the end) |
 
 ## Usage Examples
 
