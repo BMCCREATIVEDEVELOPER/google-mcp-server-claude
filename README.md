@@ -103,7 +103,7 @@ HTML.
 ### 4. Get Google OAuth credentials
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project and enable both the **Gmail API** and the **Google Calendar API**
+2. Create a project and enable the **Gmail API**, **Google Calendar API**, **Google Drive API**, **Google Docs API**, and **Google Sheets API**
 3. Go to **APIs & Services → Credentials → + Create Credentials → OAuth 2.0 Client ID**
 4. Choose **Desktop app** as the application type
 5. Download the JSON file and save it as `credentials/client_secret.json`
@@ -119,7 +119,7 @@ python setup_auth.py
 A browser window will open for each account. Sign in with the correct Google account. Tokens are saved locally and refreshed automatically — you only need to do this once per account.
 
 > **Note:** If you previously authenticated for Gmail only, you must re-run `setup_auth.py` after adding Calendar support so the tokens include the new Calendar permissions.
-> The same applies after adding Google Docs support — re-run `setup_auth.py` once per account so tokens pick up the new `documents` scope, or `docs_*` calls will fail with a permission error.
+> The same applies after adding Google Docs or Sheets support — re-run `setup_auth.py` once per account so tokens pick up the new `documents`/`spreadsheets` scopes, or `docs_*`/`sheets_*` calls will fail with a permission error.
 
 ### 6. Add the server to Claude Desktop
 
@@ -226,6 +226,43 @@ At least one of `append_text` or `find_text` must be provided.
 | `background_color` | no | Highlight color as a hex string, e.g. `"#FFFF00"` |
 
 At least one style change (`bold`, `italic`, `underline`, `strikethrough`, `font_size`, `font_family`, `foreground_color`, and/or `background_color`) must be provided, and either `find_text` or `start_index`/`end_index` to target the range.
+
+### Google Sheets
+
+| Tool | Description |
+|------|-------------|
+| `sheets_create` | Create a new spreadsheet, optionally seeded with initial row data |
+| `sheets_info` | Get a spreadsheet's title, URL, and list of tabs |
+| `sheets_read` | Read cell values for a range (defaults to the whole first tab) |
+| `sheets_update` | Overwrite cell values for a range |
+| `sheets_append` | Append rows after the last row of existing data |
+| `sheets_clear` | Clear cell values (not formatting) in a range |
+| `sheets_format` | Apply bold, italic, underline, strikethrough, font size/family, colors, alignment, or number format to a range |
+| `sheets_add_tab` | Add a new tab to a spreadsheet |
+| `sheets_rename_tab` | Rename a tab |
+| `sheets_delete_tab` | Delete a tab |
+| `sheets_rename` | Rename a spreadsheet (changes its title/file name) |
+| `sheets_delete` | Move a spreadsheet to Drive trash |
+
+Ranges use A1 notation, e.g. `"Sheet1!A1:D10"` or just `"Sheet1"` for the whole tab.
+
+#### `sheets_format` parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `account` | yes | Account name |
+| `spreadsheet_id` | yes | Google Sheets spreadsheet ID |
+| `range` | yes | A1-notation range to format, e.g. `"Sheet1!A1:C5"` |
+| `bold` / `italic` / `underline` / `strikethrough` | no | Set (true) or clear (false) the style |
+| `font_size` | no | Font size in points, e.g. `12` |
+| `font_family` | no | Font family name, e.g. `"Arial"` |
+| `foreground_color` | no | Text color as a hex string, e.g. `"#FF0000"` |
+| `background_color` | no | Cell fill/highlight color as a hex string, e.g. `"#FFFF00"` |
+| `horizontal_alignment` | no | `"LEFT"`, `"CENTER"`, or `"RIGHT"` |
+| `number_format` | no | Number format pattern, e.g. `"#,##0.00"` or `"yyyy-mm-dd"` |
+| `number_format_type` | no | Category for `number_format`: `NUMBER`, `CURRENCY`, `PERCENT`, `DATE`, `TIME`, `DATE_TIME`, `SCIENTIFIC`, or `TEXT` (default: `NUMBER`) |
+
+At least one style change must be provided.
 
 ## Usage Examples
 

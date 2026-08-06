@@ -24,6 +24,7 @@ from gcalendar import CalendarService
 from gmail import GmailService
 from gdrive import DriveService
 from gdocs import DocsService
+from gsheets import SheetsService
 
 # ---------------------------------------------------------------------------
 # Bootstrap: load config and auth manager at startup
@@ -80,6 +81,10 @@ def _get_drive(account_name: str) -> DriveService:
 
 def _get_docs(account_name: str) -> DocsService:
     return DocsService(_get_creds(account_name), account_name)
+
+
+def _get_sheets(account_name: str) -> SheetsService:
+    return SheetsService(_get_creds(account_name), account_name)
 
 
 def _check_cross_account_conflicts(
@@ -785,6 +790,206 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["account", "document_id"],
             },
         ),
+        # ── Sheets tools ─────────────────────────────────────────────────────
+        types.Tool(
+            name="sheets_create",
+            description="Create a new Google Sheet, optionally seeded with initial row data on its first tab.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "title": {"type": "string", "description": "Title of the new spreadsheet"},
+                    "data": {
+                        "type": "array",
+                        "description": "Initial rows to write, as a 2D array (each inner array is one row of cell values). Optional.",
+                        "items": {"type": "array", "items": {}},
+                    },
+                    "sheet_name": {"type": "string", "description": "Name of the first tab. Default: 'Sheet1'.", "default": "Sheet1"},
+                },
+                "required": ["account", "title"],
+            },
+        ),
+        types.Tool(
+            name="sheets_info",
+            description="Get a spreadsheet's title, URL, and the list of tabs (sheets) it contains, with each tab's id/title/row and column count.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                },
+                "required": ["account", "spreadsheet_id"],
+            },
+        ),
+        types.Tool(
+            name="sheets_read",
+            description="Read cell values for a range, e.g. 'Sheet1!A1:D10'. Defaults to the whole first tab if range is omitted.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "range": {"type": "string", "description": "A1-notation range, e.g. 'Sheet1!A1:D10' or 'Sheet1' for the whole tab. Optional — defaults to the whole first tab."},
+                },
+                "required": ["account", "spreadsheet_id"],
+            },
+        ),
+        types.Tool(
+            name="sheets_update",
+            description="Overwrite cell values for a range with a 2D array of rows.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "range": {"type": "string", "description": "A1-notation range to write into, e.g. 'Sheet1!A1'"},
+                    "values": {
+                        "type": "array",
+                        "description": "Rows to write, as a 2D array (each inner array is one row of cell values).",
+                        "items": {"type": "array", "items": {}},
+                    },
+                    "value_input_option": {
+                        "type": "string",
+                        "description": "'USER_ENTERED' parses formulas/numbers/dates like typing in the UI; 'RAW' stores values as literal strings. Default: USER_ENTERED.",
+                        "enum": ["USER_ENTERED", "RAW"],
+                        "default": "USER_ENTERED",
+                    },
+                },
+                "required": ["account", "spreadsheet_id", "range", "values"],
+            },
+        ),
+        types.Tool(
+            name="sheets_append",
+            description="Append rows of values after the last row of existing data in a range/sheet.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "range": {"type": "string", "description": "A1-notation range/sheet to append after, e.g. 'Sheet1' or 'Sheet1!A1'"},
+                    "values": {
+                        "type": "array",
+                        "description": "Rows to append, as a 2D array (each inner array is one row of cell values).",
+                        "items": {"type": "array", "items": {}},
+                    },
+                    "value_input_option": {
+                        "type": "string",
+                        "description": "'USER_ENTERED' parses formulas/numbers/dates like typing in the UI; 'RAW' stores values as literal strings. Default: USER_ENTERED.",
+                        "enum": ["USER_ENTERED", "RAW"],
+                        "default": "USER_ENTERED",
+                    },
+                },
+                "required": ["account", "spreadsheet_id", "range", "values"],
+            },
+        ),
+        types.Tool(
+            name="sheets_clear",
+            description="Clear cell values (not formatting) in a range.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "range": {"type": "string", "description": "A1-notation range to clear, e.g. 'Sheet1!A1:D10'"},
+                },
+                "required": ["account", "spreadsheet_id", "range"],
+            },
+        ),
+        types.Tool(
+            name="sheets_format",
+            description=(
+                "Apply cell formatting (bold, italic, underline, strikethrough, font size/family, "
+                "text color, fill color, horizontal alignment, number format) to a range, "
+                "e.g. 'Sheet1!A1:C5'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "range": {"type": "string", "description": "A1-notation range to format, e.g. 'Sheet1!A1:C5' or 'Sheet1' for the whole tab"},
+                    "bold": {"type": "boolean", "description": "Set (true) or clear (false) bold."},
+                    "italic": {"type": "boolean", "description": "Set (true) or clear (false) italic."},
+                    "underline": {"type": "boolean", "description": "Set (true) or clear (false) underline."},
+                    "strikethrough": {"type": "boolean", "description": "Set (true) or clear (false) strikethrough."},
+                    "font_size": {"type": "number", "description": "Font size in points, e.g. 12."},
+                    "font_family": {"type": "string", "description": "Font family name, e.g. 'Arial'."},
+                    "foreground_color": {"type": "string", "description": "Text color as a hex string, e.g. '#FF0000'."},
+                    "background_color": {"type": "string", "description": "Cell fill/highlight color as a hex string, e.g. '#FFFF00'."},
+                    "horizontal_alignment": {"type": "string", "description": "Horizontal text alignment.", "enum": ["LEFT", "CENTER", "RIGHT"]},
+                    "number_format": {"type": "string", "description": "Number format pattern, e.g. '#,##0.00' or 'yyyy-mm-dd'. Optional."},
+                    "number_format_type": {"type": "string", "description": "Category for number_format. Default: NUMBER.", "enum": ["NUMBER", "CURRENCY", "PERCENT", "DATE", "TIME", "DATE_TIME", "SCIENTIFIC", "TEXT"], "default": "NUMBER"},
+                },
+                "required": ["account", "spreadsheet_id", "range"],
+            },
+        ),
+        types.Tool(
+            name="sheets_add_tab",
+            description="Add a new tab (sheet) to an existing spreadsheet.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "title": {"type": "string", "description": "Name for the new tab"},
+                },
+                "required": ["account", "spreadsheet_id", "title"],
+            },
+        ),
+        types.Tool(
+            name="sheets_rename_tab",
+            description="Rename a tab within a spreadsheet. Identify it by its current name (sheet_name) or numeric sheet_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "new_title": {"type": "string", "description": "New name for the tab"},
+                    "sheet_name": {"type": "string", "description": "Current name of the tab to rename. Alternative to sheet_id."},
+                    "sheet_id": {"type": "integer", "description": "Numeric id of the tab to rename. Alternative to sheet_name."},
+                },
+                "required": ["account", "spreadsheet_id", "new_title"],
+            },
+        ),
+        types.Tool(
+            name="sheets_delete_tab",
+            description="Delete a tab from a spreadsheet. Identify it by its name (sheet_name) or numeric sheet_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "sheet_name": {"type": "string", "description": "Name of the tab to delete. Alternative to sheet_id."},
+                    "sheet_id": {"type": "integer", "description": "Numeric id of the tab to delete. Alternative to sheet_name."},
+                },
+                "required": ["account", "spreadsheet_id"],
+            },
+        ),
+        types.Tool(
+            name="sheets_rename",
+            description="Rename a spreadsheet (changes its title/file name).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                    "title": {"type": "string", "description": "New title for the spreadsheet"},
+                },
+                "required": ["account", "spreadsheet_id", "title"],
+            },
+        ),
+        types.Tool(
+            name="sheets_delete",
+            description="Move a spreadsheet to Drive trash.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "Account name"},
+                    "spreadsheet_id": {"type": "string", "description": "Google Sheets spreadsheet ID"},
+                },
+                "required": ["account", "spreadsheet_id"],
+            },
+        ),
     ]
 
 
@@ -1157,6 +1362,115 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
         elif name == "docs_delete":
             svc = _get_docs(args["account"])
             return _fmt(svc.delete_document(args["document_id"]))
+
+        # ---- sheets_create -----------------------------------------------------
+        elif name == "sheets_create":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.create_spreadsheet(
+                title=args["title"],
+                data=args.get("data"),
+                sheet_name=args.get("sheet_name", "Sheet1"),
+            ))
+
+        # ---- sheets_info -----------------------------------------------------
+        elif name == "sheets_info":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.get_spreadsheet(args["spreadsheet_id"]))
+
+        # ---- sheets_read -----------------------------------------------------
+        elif name == "sheets_read":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.read_values(
+                spreadsheet_id=args["spreadsheet_id"],
+                range_name=args.get("range", ""),
+            ))
+
+        # ---- sheets_update -----------------------------------------------------
+        elif name == "sheets_update":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.update_values(
+                spreadsheet_id=args["spreadsheet_id"],
+                range_name=args["range"],
+                values=args["values"],
+                value_input_option=args.get("value_input_option", "USER_ENTERED"),
+            ))
+
+        # ---- sheets_append -----------------------------------------------------
+        elif name == "sheets_append":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.append_values(
+                spreadsheet_id=args["spreadsheet_id"],
+                range_name=args["range"],
+                values=args["values"],
+                value_input_option=args.get("value_input_option", "USER_ENTERED"),
+            ))
+
+        # ---- sheets_clear -----------------------------------------------------
+        elif name == "sheets_clear":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.clear_values(
+                spreadsheet_id=args["spreadsheet_id"],
+                range_name=args["range"],
+            ))
+
+        # ---- sheets_format -----------------------------------------------------
+        elif name == "sheets_format":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.format_cells(
+                spreadsheet_id=args["spreadsheet_id"],
+                range_name=args["range"],
+                bold=args.get("bold"),
+                italic=args.get("italic"),
+                underline=args.get("underline"),
+                strikethrough=args.get("strikethrough"),
+                font_size=args.get("font_size"),
+                font_family=args.get("font_family"),
+                foreground_color=args.get("foreground_color"),
+                background_color=args.get("background_color"),
+                horizontal_alignment=args.get("horizontal_alignment"),
+                number_format=args.get("number_format"),
+                number_format_type=args.get("number_format_type", "NUMBER"),
+            ))
+
+        # ---- sheets_add_tab -----------------------------------------------------
+        elif name == "sheets_add_tab":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.add_sheet(
+                spreadsheet_id=args["spreadsheet_id"],
+                title=args["title"],
+            ))
+
+        # ---- sheets_rename_tab -----------------------------------------------------
+        elif name == "sheets_rename_tab":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.rename_sheet(
+                spreadsheet_id=args["spreadsheet_id"],
+                new_title=args["new_title"],
+                sheet_name=args.get("sheet_name", ""),
+                sheet_id=args.get("sheet_id"),
+            ))
+
+        # ---- sheets_delete_tab -----------------------------------------------------
+        elif name == "sheets_delete_tab":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.delete_sheet(
+                spreadsheet_id=args["spreadsheet_id"],
+                sheet_name=args.get("sheet_name", ""),
+                sheet_id=args.get("sheet_id"),
+            ))
+
+        # ---- sheets_rename -----------------------------------------------------
+        elif name == "sheets_rename":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.rename_spreadsheet(
+                spreadsheet_id=args["spreadsheet_id"],
+                title=args["title"],
+            ))
+
+        # ---- sheets_delete -----------------------------------------------------
+        elif name == "sheets_delete":
+            svc = _get_sheets(args["account"])
+            return _fmt(svc.delete_spreadsheet(args["spreadsheet_id"]))
 
         else:
             return _fmt(f"Unknown tool: {name}")
