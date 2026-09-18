@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+import json
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,6 +24,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/forms.responses.readonly",
 ]
 
+# Maps account names to Railway environment variable names
+ACCOUNT_ENV_MAP = {
+    "leecrockett": "Lee_Crockett_main",
+    "brooketaylor": "Brooke_Taylor_Coaching",
+    "afaraglobal": "Afara_Global",
+    "voylegal": "VoyLegal",
+}
+
 
 class AuthManager:
     def __init__(self, credentials_dir: Path, client_secret_path: Path):
@@ -34,13 +45,24 @@ class AuthManager:
 
     def get_credentials(self, account_name: str) -> Optional[Credentials]:
         token_path = self.get_token_path(account_name)
-        if not token_path.exists():
-            return None
 
-        try:
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-        except Exception:
-            return None
+        if token_path.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            except Exception:
+                return None
+        else:
+            # Fall back to environment variable (used on Railway)
+            env_var = ACCOUNT_ENV_MAP.get(account_name, account_name)
+            token_json = os.environ.get(env_var)
+            if not token_json:
+                return None
+            try:
+                creds = Credentials.from_authorized_user_info(
+                    json.loads(token_json), SCOPES
+                )
+            except Exception:
+                return None
 
         if creds.valid:
             return creds
@@ -66,8 +88,6 @@ class AuthManager:
             str(self.client_secret_path), SCOPES
         )
 
-        # login_hint pre-fills the email field; prompt=select_account
-        # forces account picker even if already signed in.
         kwargs: dict = {"port": 0, "prompt": "select_account"}
         if email:
             kwargs["login_hint"] = email
