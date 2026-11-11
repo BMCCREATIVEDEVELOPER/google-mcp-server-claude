@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -33,6 +34,16 @@ ACCOUNT_ENV_MAP = {
 }
 
 
+def _log_auth_error(account_name: str, what: str, exc: Exception) -> None:
+    """Write the real reason an account is not authenticated to stderr.
+
+    stderr is safe for both transports (stdout carries the MCP protocol in
+    stdio mode). Only the account name, the step and Google's error text are
+    logged, never token contents.
+    """
+    print(f"[auth] {account_name}: {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 class AuthManager:
     def __init__(self, credentials_dir: Path, client_secret_path: Path):
         self.credentials_dir = Path(credentials_dir)
@@ -46,33 +57,52 @@ class AuthManager:
     def get_credentials(self, account_name: str) -> Optional[Credentials]:
         token_path = self.get_token_path(account_name)
 
+        # Tokens are loaded with scopes=None so each one keeps the scopes it
+        # was actually granted. Forcing the full SCOPES list here made Google
+        # reject the refresh with "invalid_scope" for any token that was
+        # created with fewer permissions (e.g. no Docs/Sheets/Forms).
         if token_path.exists():
             try:
-                creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-            except Exception:
+                creds = Credentials.from_authorized_user_file(str(token_path), None)
+            except Exception as exc:
+                _log_auth_error(account_name, f"could not read token file {token_path.name}", exc)
                 return None
         else:
             # Fall back to environment variable (used on Railway)
             env_var = ACCOUNT_ENV_MAP.get(account_name, account_name)
             token_json = os.environ.get(env_var)
             if not token_json:
+                print(
+                    f"[auth] {account_name}: no token file and environment variable "
+                    f"'{env_var}' is not set",
+                    file=sys.stderr,
+                )
                 return None
             try:
                 creds = Credentials.from_authorized_user_info(
-                    json.loads(token_json), SCOPES
+                    json.loads(token_json), None
                 )
-            except Exception:
+            except Exception as exc:
+                _log_auth_error(account_name, f"could not read token from environment variable '{env_var}'", exc)
                 return None
 
         if creds.valid:
             return creds
 
-        if creds.expired and creds.refresh_token:
+        if not creds.refresh_token:
+            print(
+                f"[auth] {account_name}: token is expired and has no refresh token",
+                file=sys.stderr,
+            )
+            return None
+
+        if creds.expired:
             try:
                 creds.refresh(Request())
                 self._save_token(account_name, creds)
                 return creds
-            except Exception:
+            except Exception as exc:
+                _log_auth_error(account_name, "token refresh failed", exc)
                 return None
 
         return None
