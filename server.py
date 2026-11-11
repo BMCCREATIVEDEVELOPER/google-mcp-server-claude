@@ -2,7 +2,8 @@
 Gmail Multi-Account MCP Server
 -------------------------------
 Exposes Gmail operations for multiple Google accounts via the
-Model Context Protocol (MCP) stdio transport.
+Model Context Protocol (MCP) stdio transport (default) or HTTP
+(Streamable HTTP at /mcp, legacy SSE at /sse) with --transport http.
 
 Start with:  python server.py
 Configure accounts in config.json and authenticate with: python setup_auth.py
@@ -2213,6 +2214,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
 
 
 async def main() -> None:
+    """Run over stdio (default; used by Claude Desktop / Claude Code launching us)."""
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -2221,5 +2223,126 @@ async def main() -> None:
         )
 
 
+MIN_SECRET_LENGTH = 20
+
+
+def build_http_app(secret: str):
+    """
+    Build the web app that serves MCP over HTTP. Every path contains a secret;
+    requests with a missing or wrong secret get a 404 and reach no MCP code.
+
+      /mcp/<secret>             Streamable HTTP (the current MCP standard)
+      /sse/<secret>             Legacy SSE stream (GET) for older clients. POST
+                                here is also handled as Streamable HTTP, so
+                                clients pointed at /sse that POST first no
+                                longer get a 405.
+      /messages/<secret>/       Companion endpoint for the legacy SSE transport.
+    """
+    import contextlib
+    import hmac
+
+    from mcp.server.sse import SseServerTransport
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Mount, Route
+
+    def secret_ok(candidate: str) -> bool:
+        # Constant-time comparison so the secret cannot be guessed by timing.
+        return hmac.compare_digest(candidate.encode(), secret.encode())
+
+    async def reject(scope, receive, send):
+        await PlainTextResponse("Not found", status_code=404)(scope, receive, send)
+
+    # stateless=True: every request stands alone, so there is no session to
+    # lose when a connection drops or the server restarts.
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
+    # The SSE client is told to POST its messages to this path, which also
+    # carries the secret.
+    sse = SseServerTransport(f"/messages/{secret}/")
+
+    # Plain ASGI apps (not Starlette function endpoints) so we control the
+    # raw response. Exact Routes, not Mounts: a Mount would change the path
+    # prefix and break the SSE client's message address.
+    class McpEndpoint:
+        async def __call__(self, scope, receive, send):
+            if not secret_ok(scope["path_params"]["secret"]):
+                return await reject(scope, receive, send)
+            await session_manager.handle_request(scope, receive, send)
+
+    class SseEndpoint:
+        async def __call__(self, scope, receive, send):
+            if not secret_ok(scope["path_params"]["secret"]):
+                return await reject(scope, receive, send)
+            if scope["method"] == "GET":
+                async with sse.connect_sse(scope, receive, send) as streams:
+                    await server.run(
+                        streams[0], streams[1], server.create_initialization_options()
+                    )
+                # connect_sse already sent the response; avoid a double response.
+                return
+            # POST / DELETE etc. on /sse: treat as Streamable HTTP.
+            await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
+
+    return Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/mcp/{secret}", endpoint=McpEndpoint()),
+            Route("/sse/{secret}", endpoint=SseEndpoint()),
+            # Mounted at the literal secret path, so a wrong secret never matches.
+            Mount(f"/messages/{secret}/", app=sse.handle_post_message),
+        ],
+    )
+
+
+def run_http(host: str, port: int) -> None:
+    import os
+
+    import uvicorn
+
+    secret = os.environ.get("MCP_SECRET", "")
+    if len(secret) < MIN_SECRET_LENGTH:
+        print(
+            f"STARTUP ERROR: set the MCP_SECRET environment variable to a long "
+            f"random value (at least {MIN_SECRET_LENGTH} characters). Refusing to "
+            f"start the HTTP server without it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not all(c.isalnum() or c in "-_" for c in secret):
+        print("STARTUP ERROR: MCP_SECRET may only contain letters, digits, - and _ "
+              "(it is used inside a URL).", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"MCP over HTTP listening on {host}:{port} (paths /mcp/<secret>, /sse/<secret>)",
+          file=sys.stderr)
+    # access_log=False: the secret is part of the URL, so request lines must
+    # not be written to the logs.
+    uvicorn.run(build_http_app(secret), host=host, port=port,
+                log_level="warning", access_log=False)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="Gmail multi-account MCP server")
+    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    parser.add_argument("--host", default=None,
+                        help="http mode only. Default: 0.0.0.0 when the PORT env var "
+                             "is set (Railway), otherwise 127.0.0.1")
+    parser.add_argument("--port", type=int, default=None,
+                        help="http mode only. Default: the PORT env var, else 8000")
+    args = parser.parse_args()
+
+    if args.transport == "http":
+        host = args.host or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+        port = args.port or int(os.environ.get("PORT", "8000"))
+        run_http(host, port)
+    else:
+        asyncio.run(main())

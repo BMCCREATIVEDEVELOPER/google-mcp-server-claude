@@ -144,6 +144,31 @@ Replace `/absolute/path/to/gmail-mcp` with the actual path where you cloned the 
 
 All tools will appear automatically.
 
+## Running over HTTP (optional, e.g. Railway)
+
+By default the server uses stdio (Claude Desktop launches it for you). To serve it over the web instead:
+
+```bash
+export MCP_SECRET=$(python3 -c "import secrets;print(secrets.token_hex(32))")
+python server.py --transport http
+```
+
+`MCP_SECRET` is required (at least 20 characters; letters, digits, `-` and `_` only). The server refuses to start without it. The secret is part of every URL:
+
+| Path | What it is |
+|------|------------|
+| `/mcp/<secret>` | Streamable HTTP (current MCP standard, stateless, so restarts and dropped connections do not lose a session) |
+| `/sse/<secret>` | Legacy SSE stream for older clients. POST requests here are also handled as Streamable HTTP |
+| `/messages/<secret>/` | Companion endpoint used by the legacy SSE transport |
+
+Any request with a missing or wrong secret gets a `404`. Request lines are not logged, so the secret does not end up in log files.
+
+**Host and port:** if the `PORT` environment variable is set (Railway sets it), the server listens on `0.0.0.0:$PORT`. Otherwise it listens on `127.0.0.1:8000`. `--host` and `--port` override both.
+
+**Railway:** the included `Procfile` starts the server. Add `MCP_SECRET` under Variables. Your connector URL is `https://<your-railway-domain>/mcp/<MCP_SECRET>`.
+
+> The secret in the URL is simple protection, not full authentication. Anyone who learns the URL has full access to your Google accounts through this server. Keep it private, and change `MCP_SECRET` to rotate it.
+
 ## Available Tools
 
 ### Gmail
