@@ -149,25 +149,22 @@ All tools will appear automatically.
 By default the server uses stdio (Claude Desktop launches it for you). To serve it over the web instead:
 
 ```bash
-export MCP_SECRET=$(python3 -c "import secrets;print(secrets.token_hex(32))")
 python server.py --transport http
 ```
 
-`MCP_SECRET` is required (at least 20 characters; letters, digits, `-` and `_` only). The server refuses to start without it. The secret is part of every URL:
-
 | Path | What it is |
 |------|------------|
-| `/mcp/<secret>` | Streamable HTTP (current MCP standard, stateless, so restarts and dropped connections do not lose a session) |
-| `/sse/<secret>` | Legacy SSE stream for older clients. POST requests here are also handled as Streamable HTTP |
-| `/messages/<secret>/` | Companion endpoint used by the legacy SSE transport |
+| `/mcp` | Streamable HTTP (current MCP standard, stateless, so restarts and dropped connections do not lose a session) |
+| `/sse` | `GET`: legacy SSE stream for older clients. `POST`: handled as Streamable HTTP, so a client pointed at `/sse` that POSTs first does not get a 405 |
+| `/messages/` | Companion endpoint used by the legacy SSE transport |
 
-Any request with a missing or wrong secret gets a `404`. Request lines are not logged, so the secret does not end up in log files.
+Paths work with or without a trailing slash.
 
 **Host and port:** if the `PORT` environment variable is set (Railway sets it), the server listens on `0.0.0.0:$PORT`. Otherwise it listens on `127.0.0.1:8000`. `--host` and `--port` override both.
 
-**Railway:** the included `Procfile` starts the server. Add `MCP_SECRET` under Variables. Your connector URL is `https://<your-railway-domain>/mcp/<MCP_SECRET>`.
+**Optional secret (`MCP_SECRET`):** if the `MCP_SECRET` environment variable is not set (or is empty), **no authentication is required** and the server prints a warning at startup. If it is set (at least 20 characters; letters, digits, `-` and `_` only), the secret becomes part of every path (`/mcp/<secret>`, `/sse/<secret>`, `/messages/<secret>/`) and any other request gets a `404`. A set but too-short secret makes the server refuse to start, so a typo never silently leaves it open. Request lines are not logged.
 
-> The secret in the URL is simple protection, not full authentication. Anyone who learns the URL has full access to your Google accounts through this server. Keep it private, and change `MCP_SECRET` to rotate it.
+> **Security:** without `MCP_SECRET`, anyone who can reach the URL can read and send mail from your Google accounts through this server. Set a secret, or put authentication in front of it, whenever the server is reachable from the internet.
 
 ## Available Tools
 

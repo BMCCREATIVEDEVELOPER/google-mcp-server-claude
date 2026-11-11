@@ -15,7 +15,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import mcp.types as types
 from mcp.server import Server
@@ -2226,17 +2226,20 @@ async def main() -> None:
 MIN_SECRET_LENGTH = 20
 
 
-def build_http_app(secret: str):
+def build_http_app(secret: Optional[str] = None):
     """
-    Build the web app that serves MCP over HTTP. Every path contains a secret;
-    requests with a missing or wrong secret get a 404 and reach no MCP code.
+    Build the web app that serves MCP over HTTP.
 
-      /mcp/<secret>             Streamable HTTP (the current MCP standard)
-      /sse/<secret>             Legacy SSE stream (GET) for older clients. POST
-                                here is also handled as Streamable HTTP, so
-                                clients pointed at /sse that POST first no
-                                longer get a 405.
-      /messages/<secret>/       Companion endpoint for the legacy SSE transport.
+    Without a secret (MCP_SECRET not set), the paths are:
+
+      /mcp         Streamable HTTP (the current MCP standard)
+      /sse         GET: legacy SSE stream for older clients.
+                   POST (and anything else): handled as Streamable HTTP, so a
+                   client pointed at /sse that POSTs first no longer gets a 405.
+      /messages/   Companion endpoint for the legacy SSE transport.
+
+    With a secret, every path gets it added (/mcp/<secret>, /sse/<secret>,
+    /messages/<secret>/) and any other request gets a 404.
     """
     import contextlib
     import hmac
@@ -2247,7 +2250,10 @@ def build_http_app(secret: str):
     from starlette.responses import PlainTextResponse
     from starlette.routing import Mount, Route
 
-    def secret_ok(candidate: str) -> bool:
+    def secret_ok(scope) -> bool:
+        if not secret:
+            return True
+        candidate = scope.get("path_params", {}).get("secret", "")
         # Constant-time comparison so the secret cannot be guessed by timing.
         return hmac.compare_digest(candidate.encode(), secret.encode())
 
@@ -2257,22 +2263,22 @@ def build_http_app(secret: str):
     # stateless=True: every request stands alone, so there is no session to
     # lose when a connection drops or the server restarts.
     session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
-    # The SSE client is told to POST its messages to this path, which also
-    # carries the secret.
-    sse = SseServerTransport(f"/messages/{secret}/")
+    # The SSE client is told to POST its messages to this path.
+    messages_path = f"/messages/{secret}/" if secret else "/messages/"
+    sse = SseServerTransport(messages_path)
 
     # Plain ASGI apps (not Starlette function endpoints) so we control the
     # raw response. Exact Routes, not Mounts: a Mount would change the path
     # prefix and break the SSE client's message address.
     class McpEndpoint:
         async def __call__(self, scope, receive, send):
-            if not secret_ok(scope["path_params"]["secret"]):
+            if not secret_ok(scope):
                 return await reject(scope, receive, send)
             await session_manager.handle_request(scope, receive, send)
 
     class SseEndpoint:
         async def __call__(self, scope, receive, send):
-            if not secret_ok(scope["path_params"]["secret"]):
+            if not secret_ok(scope):
                 return await reject(scope, receive, send)
             if scope["method"] == "GET":
                 async with sse.connect_sse(scope, receive, send) as streams:
@@ -2289,15 +2295,16 @@ def build_http_app(secret: str):
         async with session_manager.run():
             yield
 
-    return Starlette(
-        lifespan=lifespan,
-        routes=[
-            Route("/mcp/{secret}", endpoint=McpEndpoint()),
-            Route("/sse/{secret}", endpoint=SseEndpoint()),
-            # Mounted at the literal secret path, so a wrong secret never matches.
-            Mount(f"/messages/{secret}/", app=sse.handle_post_message),
-        ],
-    )
+    suffix = "/{secret}" if secret else ""
+    routes = []
+    # Both with and without a trailing slash, so the client's URL works exactly
+    # as written (no redirect, which some clients do not follow on POST).
+    for base, endpoint in (("/mcp", McpEndpoint()), ("/sse", SseEndpoint())):
+        routes.append(Route(base + suffix, endpoint=endpoint))
+        routes.append(Route(base + suffix + "/", endpoint=endpoint))
+    routes.append(Mount(messages_path, app=sse.handle_post_message))
+
+    return Starlette(lifespan=lifespan, routes=routes)
 
 
 def run_http(host: str, port: int) -> None:
@@ -2305,24 +2312,32 @@ def run_http(host: str, port: int) -> None:
 
     import uvicorn
 
-    secret = os.environ.get("MCP_SECRET", "")
-    if len(secret) < MIN_SECRET_LENGTH:
-        print(
-            f"STARTUP ERROR: set the MCP_SECRET environment variable to a long "
-            f"random value (at least {MIN_SECRET_LENGTH} characters). Refusing to "
-            f"start the HTTP server without it.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if not all(c.isalnum() or c in "-_" for c in secret):
-        print("STARTUP ERROR: MCP_SECRET may only contain letters, digits, - and _ "
-              "(it is used inside a URL).", file=sys.stderr)
-        sys.exit(1)
+    secret = os.environ.get("MCP_SECRET", "") or None  # empty counts as not set
+    if secret is not None:
+        # Fail closed: a secret that is set but unusable must not silently
+        # turn into an open server.
+        if len(secret) < MIN_SECRET_LENGTH:
+            print(
+                f"STARTUP ERROR: MCP_SECRET is set but shorter than {MIN_SECRET_LENGTH} "
+                f"characters. Use a long random value, or remove the variable to run "
+                f"without a secret.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not all(c.isalnum() or c in "-_" for c in secret):
+            print("STARTUP ERROR: MCP_SECRET may only contain letters, digits, - and _ "
+                  "(it is used inside a URL).", file=sys.stderr)
+            sys.exit(1)
+        print(f"MCP over HTTP listening on {host}:{port} (paths /mcp/<secret>, /sse/<secret>)",
+              file=sys.stderr)
+    else:
+        print(f"MCP over HTTP listening on {host}:{port} (paths /mcp, /sse)", file=sys.stderr)
+        print("WARNING: MCP_SECRET is not set, so NO authentication is required. "
+              "Anyone who can reach this URL can use your Google accounts.",
+              file=sys.stderr)
 
-    print(f"MCP over HTTP listening on {host}:{port} (paths /mcp/<secret>, /sse/<secret>)",
-          file=sys.stderr)
-    # access_log=False: the secret is part of the URL, so request lines must
-    # not be written to the logs.
+    # access_log=False: when a secret is used it is part of the URL, so
+    # request lines must not be written to the logs.
     uvicorn.run(build_http_app(secret), host=host, port=port,
                 log_level="warning", access_log=False)
 
